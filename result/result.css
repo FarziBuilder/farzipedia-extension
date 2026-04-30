@@ -1,0 +1,285 @@
+/* FarziPedia codex — magazine page. */
+:root {
+  --parchment: #f4e8c8;
+  --parchment-light: #faf3e0;
+  --parchment-dark: #ebd9a8;
+  --ink: #2a1f12;
+  --ink-soft: #5a4530;
+  --sepia: #8b5a2b;
+  --vermillion: #a83c1f;
+  --gold: #c9a449;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  font-family: 'IM Fell English', Garamond, serif;
+  color: var(--ink);
+  line-height: 1.6;
+  background-color: var(--parchment);
+  background-image:
+    radial-gradient(at 0% 0%, rgba(212, 176, 92, 0.14) 0, transparent 50%),
+    radial-gradient(at 100% 100%, rgba(168, 60, 31, 0.10) 0, transparent 50%),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.45  0 0 0 0 0.32  0 0 0 0 0.18  0 0 0 0.10 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  background-size: cover, cover, 400px 400px;
+  background-blend-mode: normal, normal, multiply;
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+
+article { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+
+/* ---- Utility bar ---- */
+.utilbar {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 0;
+  background: rgba(244, 232, 200, 0.85);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid rgba(107, 66, 32, 0.25);
+  margin: 0 -24px 32px;
+  padding-left: 24px; padding-right: 24px;
+}
+.brand { display: flex; align-items: center; gap: 8px; text-decoration: none; }
+.emblem { font-size: 18px; color: var(--sepia); }
+.wordmark {
+  font-family: 'Cinzel', serif;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  font-size: 16px;
+}
+.wordmark span { color: var(--vermillion); }
+
+.bar-actions { display: flex; gap: 8px; }
+.chip {
+  font-family: 'IM Fell English', serif;
+  font-size: 13px;
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid rgba(107, 66, 32, 0.4);
+  color: var(--ink-soft);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.chip:hover { background: rgba(168, 60, 31, 0.08); color: var(--ink); border-color: var(--vermillion); }
+.chip.primary {
+  background: var(--ink);
+  color: var(--parchment);
+  border-color: var(--ink);
+}
+.chip.primary:hover { background: var(--vermillion); color: var(--parchment); }
+
+/* ---- Header ---- */
+.codex-header { text-align: center; padding: 8px 0 24px; }
+.codex-header .label {
+  font-family: 'Cinzel', serif;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: var(--vermillion);
+  text-transform: uppercase;
+  margin-bottom: 18px;
+}
+.codex-header h1 {
+  font-family: 'Cormorant Garamond', serif;
+  font-weight: 600;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  line-height: 1.05;
+  margin: 0 0 12px;
+  letter-spacing: -0.005em;
+}
+.codex-header .subtitle {
+  font-family: 'Cormorant Garamond', serif;
+  font-style: italic;
+  font-size: clamp(1.1rem, 2vw, 1.4rem);
+  color: var(--ink-soft);
+  margin: 0 0 24px;
+}
+.codex-header .meta-row {
+  font-family: 'Cormorant Garamond', serif;
+  font-style: italic;
+  color: var(--sepia);
+  font-size: 14px;
+}
+.codex-header .meta-row a { color: inherit; text-decoration: underline; text-decoration-style: dotted; }
+.codex-header .meta-row .dot { margin: 0 8px; opacity: 0.6; }
+
+.ornament-rule {
+  display: flex; align-items: center; gap: 12px;
+  color: var(--sepia);
+  margin: 24px auto;
+  max-width: 360px;
+}
+.ornament-rule::before, .ornament-rule::after {
+  content: ""; flex: 1; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--sepia) 20%, var(--sepia) 80%, transparent);
+}
+.ornament-rule .fleuron {
+  font-family: 'IM Fell English', serif;
+  font-size: 18px;
+}
+
+/* ---- Hero figure ---- */
+.hero-figure {
+  margin: 0 0 32px;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 30px 60px -20px rgba(80, 50, 20, 0.3);
+}
+.hero-figure img { display: block; width: 100%; height: auto; }
+
+/* ---- Sections ---- */
+section.codex-section { margin-bottom: 48px; }
+section h2 {
+  font-family: 'Cormorant Garamond', serif;
+  font-weight: 600;
+  font-size: clamp(1.4rem, 2.4vw, 1.85rem);
+  letter-spacing: -0.005em;
+  margin: 36px 0 18px;
+  line-height: 1.2;
+}
+
+p {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 1.18rem;
+  line-height: 1.65;
+  color: var(--ink);
+  margin: 0 0 16px;
+}
+
+figure {
+  margin: 28px 0;
+  border-radius: 4px;
+  background: rgba(250, 243, 224, 0.7);
+  border: 1px solid rgba(107, 66, 32, 0.18);
+  overflow: hidden;
+}
+figure img { display: block; width: 100%; height: auto; }
+figcaption {
+  font-family: 'Cormorant Garamond', serif;
+  font-style: italic;
+  font-size: 14px;
+  color: var(--ink-soft);
+  padding: 10px 14px;
+  background: rgba(244, 232, 200, 0.6);
+  border-top: 1px solid rgba(107, 66, 32, 0.18);
+}
+figcaption .ts {
+  font-family: 'JetBrains Mono', monospace;
+  font-style: normal;
+  color: var(--vermillion);
+  font-size: 11px;
+  margin-right: 8px;
+}
+
+aside.callout {
+  margin: 24px 0;
+  padding: 16px 20px;
+  border-radius: 4px;
+  border-left: 3px solid var(--vermillion);
+  background: rgba(168, 60, 31, 0.06);
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 1.1rem;
+}
+aside.callout.warning { border-color: #b94a3b; background: rgba(185, 74, 59, 0.07); }
+aside.callout.aside   { border-color: var(--sepia); background: rgba(139, 90, 43, 0.06); }
+
+pre {
+  margin: 24px 0;
+  padding: 16px;
+  background: var(--ink);
+  color: var(--parchment);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+blockquote {
+  margin: 24px 0;
+  padding-left: 18px;
+  border-left: 3px solid var(--vermillion);
+  font-family: 'Cormorant Garamond', serif;
+  font-style: italic;
+  font-size: 1.25rem;
+  color: var(--ink);
+}
+blockquote footer {
+  margin-top: 6px;
+  font-style: normal;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--sepia);
+}
+
+.takeaways {
+  margin-top: 60px;
+  padding: 24px 28px;
+  border: 1px solid rgba(107, 66, 32, 0.3);
+  background: rgba(250, 243, 224, 0.7);
+  border-radius: 4px;
+  position: relative;
+}
+.takeaways::before, .takeaways::after {
+  content: ""; position: absolute; width: 18px; height: 18px;
+  border: 1px solid var(--ink);
+  pointer-events: none;
+}
+.takeaways::before { top: 5px; left: 5px; border-right: 0; border-bottom: 0; }
+.takeaways::after { bottom: 5px; right: 5px; border-left: 0; border-top: 0; }
+.takeaways h2 {
+  font-family: 'Cormorant Garamond', serif;
+  font-weight: 600;
+  font-size: 1.5rem;
+  margin: 0 0 12px;
+}
+.takeaways ul { list-style: none; padding: 0; margin: 0; }
+.takeaways li {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 1.15rem;
+  line-height: 1.55;
+  margin-bottom: 12px;
+  display: flex; gap: 10px;
+}
+.takeaways li::before {
+  content: '→';
+  color: var(--vermillion);
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+footer.colophon {
+  margin: 48px 0 24px;
+  font-family: 'Cormorant Garamond', serif;
+  font-style: italic;
+  font-size: 12px;
+  color: var(--sepia);
+  text-align: center;
+  border-top: 1px solid rgba(107, 66, 32, 0.25);
+  padding-top: 16px;
+}
+.loading {
+  text-align: center; padding: 80px 0; color: var(--sepia);
+  font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 18px;
+}
+
+/* ---- Print stylesheet ---- */
+@media print {
+  .no-print { display: none !important; }
+  body {
+    background: #fff !important;
+    background-image: none !important;
+    color: #1a1108 !important;
+  }
+  article { max-width: none; padding: 0; }
+  figure, aside, pre, blockquote, .takeaways { break-inside: avoid; page-break-inside: avoid; }
+  @page { size: A4; margin: 18mm 16mm; }
+  p, figcaption, li { font-size: 11pt !important; line-height: 1.55 !important; }
+  h1 { font-size: 24pt !important; line-height: 1.1 !important; }
+  h2 { font-size: 16pt !important; line-height: 1.2 !important; }
+  figure img { box-shadow: none !important; max-height: 70vh; object-fit: contain; }
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+}

@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "FarziPedia",
+  "version": "0.2.0",
+  "description": "Turn any YouTube video into a beautifully illustrated blog post — entirely in your browser.",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://*.youtube.com/*",
+    "https://api.anthropic.com/*"
+  ],
+  "action": {
+    "default_title": "FarziPedia",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["result/result.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

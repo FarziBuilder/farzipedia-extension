@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=IM+Fell+English:ital@0;1&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="popup.css">
+  <title>FarziPedia</title>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="emblem">❦</span>
+      <span class="wordmark"><span>F</span>arzi<span>P</span>edia</span>
+    </div>
+  </header>
+
+  <!-- IDLE state -->
+  <section id="state-idle" class="state">
+    <p class="latin">de pictura mota — illuminata</p>
+    <div id="not-on-youtube" class="warn hidden">
+      Open a YouTube watch page first, then click the FarziPedia icon again.
+    </div>
+    <div id="video-summary" class="summary hidden">
+      <div class="summary-title" id="video-title"></div>
+      <div class="summary-meta">
+        <span id="video-channel"></span>
+        <span class="dot">·</span>
+        <span id="video-duration"></span>
+      </div>
+    </div>
+    <button id="generate-btn" class="primary" disabled>Render the Codex</button>
+
+    <div id="key-status" class="key-status"></div>
+
+    <details class="settings">
+      <summary>Use my own API key (overrides built-in)</summary>
+      <p class="hint">
+        FarziPedia calls Claude directly from your browser. By default it uses
+        a built-in key — but you can paste your own to bill against your own
+        account or get higher limits. Get one at
+        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
+      </p>
+      <input id="api-key" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
+      <div class="row">
+        <label class="muted"><input type="checkbox" id="show-key"> show</label>
+        <div>
+          <button id="clear-key" class="secondary">Clear</button>
+          <button id="save-key" class="secondary">Save</button>
+        </div>
+      </div>
+      <div id="save-msg" class="muted"></div>
+    </details>
+  </section>
+
+  <!-- RUNNING state -->
+  <section id="state-running" class="state hidden">
+    <p class="latin">whilst the master sketcheth thy codex…</p>
+    <div class="progress">
+      <div id="bar" class="bar" style="width:0%"></div>
+    </div>
+    <div id="status" class="status">starting…</div>
+    <div id="elapsed" class="muted">0:00 elapsed</div>
+    <ul id="warnings" class="warnings"></ul>
+  </section>
+
+  <!-- ERROR state -->
+  <section id="state-error" class="state hidden">
+    <p class="latin">a misfortune hath befallen us</p>
+    <pre id="error-msg" class="error"></pre>
+    <button id="retry-btn" class="secondary">Try again</button>
+  </section>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
