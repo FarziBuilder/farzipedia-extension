@@ -622,8 +622,27 @@ async function seekAndPrepare(tabId, t) {
       const s = document.createElement('style');
       s.id = STYLE_ID;
       s.textContent = `
-        /* All player overlays / chrome — anything that floats above the
-           actual <video> pixels and would leak into a captureVisibleTab. */
+        /* === YouTube site-level chrome (ytd-* custom elements) ===
+           These are position:fixed at the top of the viewport and visually
+           overlap the top of the <video> element, so they leak into a
+           captureVisibleTab crop of the video bounds. Use display:none
+           so they're removed from the paint tree entirely. */
+        ytd-masthead,
+        #masthead-container,
+        #masthead,
+        tp-yt-app-header,
+        tp-yt-iron-overlay-backdrop,
+        ytd-popup-container,
+        ytd-mealbar-promo-renderer,
+        ytd-button-renderer.style-scope.ytd-masthead,
+        #consent-bump-v2-lightbox,
+        ytd-consent-bump-v2-lightbox,
+        ytd-engagement-panel-section-list-renderer[modern-panels] {
+          display: none !important;
+        }
+
+        /* === In-player chrome === Hidden via visibility so the player
+           keeps its layout (some code reads the player rect). */
         .ytp-chrome-top,
         .ytp-chrome-top-buttons,
         .ytp-title,

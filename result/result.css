@@ -269,6 +269,10 @@ footer.colophon {
 /* ---- Print stylesheet ---- */
 @media print {
   .no-print { display: none !important; }
+  /* Hero figure pushes the title to page 2 (full-width unconstrained image)
+     so we suppress it in print and let the codex-header lead. Matches the
+     farzi.me /blog/{id} print behaviour where the hero is also no-print. */
+  .hero-figure { display: none !important; }
   body {
     background: #fff !important;
     background-image: none !important;
@@ -276,6 +280,8 @@ footer.colophon {
   }
   article { max-width: none; padding: 0; }
   figure, aside, pre, blockquote, .takeaways { break-inside: avoid; page-break-inside: avoid; }
+  /* Keep the codex header together with the first section. */
+  .codex-header { page-break-after: avoid; break-after: avoid-page; }
   @page { size: A4; margin: 18mm 16mm; }
   p, figcaption, li { font-size: 11pt !important; line-height: 1.55 !important; }
   h1 { font-size: 24pt !important; line-height: 1.1 !important; }
