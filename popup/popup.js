@@ -1,6 +1,6 @@
 // FarziPedia popup — UI for the foolproof background pipeline.
-
-import { BUILTIN_API_KEY } from '../lib/config.js';
+// No API key handling: requests are proxied through farzi.me, which holds
+// the server-side Anthropic key.
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,12 +16,6 @@ const ui = {
   videoChannel: $('video-channel'),
   videoDuration:$('video-duration'),
   generateBtn:  $('generate-btn'),
-  keyStatus:    $('key-status'),
-  apiKey:       $('api-key'),
-  showKey:      $('show-key'),
-  saveKey:      $('save-key'),
-  clearKey:     $('clear-key'),
-  saveMsg:      $('save-msg'),
   bar:          $('bar'),
   status:       $('status'),
   elapsed:      $('elapsed'),
@@ -42,40 +36,6 @@ function fmtSeconds(s) {
   return `${m}:${(s % 60).toString().padStart(2, '0')}`;
 }
 
-const HAS_BUILTIN = !!(BUILTIN_API_KEY || '').trim();
-
-// ---------- API key handling ----------
-
-ui.showKey.addEventListener('change', () => {
-  ui.apiKey.type = ui.showKey.checked ? 'text' : 'password';
-});
-
-(async () => {
-  const { anthropicApiKey } = await chrome.storage.sync.get('anthropicApiKey');
-  if (anthropicApiKey) ui.apiKey.value = anthropicApiKey;
-})();
-
-ui.saveKey.addEventListener('click', async () => {
-  const key = ui.apiKey.value.trim();
-  if (!key) { ui.saveMsg.textContent = 'Paste a key first.'; return; }
-  if (!key.startsWith('sk-ant-')) {
-    ui.saveMsg.textContent = "Doesn't look like an Anthropic key (sk-ant-…).";
-    return;
-  }
-  await chrome.storage.sync.set({ anthropicApiKey: key });
-  ui.saveMsg.textContent = 'Saved.';
-  setTimeout(() => { ui.saveMsg.textContent = ''; }, 1800);
-  await initIdle();
-});
-
-ui.clearKey.addEventListener('click', async () => {
-  await chrome.storage.sync.remove('anthropicApiKey');
-  ui.apiKey.value = '';
-  ui.saveMsg.textContent = HAS_BUILTIN ? 'Cleared. Falling back to built-in key.' : 'Cleared.';
-  setTimeout(() => { ui.saveMsg.textContent = ''; }, 2200);
-  await initIdle();
-});
-
 // ---------- Idle state ----------
 
 async function getActiveTab() {
@@ -90,20 +50,6 @@ async function initIdle() {
 
   ui.notOnYoutube.classList.toggle('hidden', onWatch);
   ui.videoSummary.classList.toggle('hidden', !onWatch);
-
-  // Key status
-  const { anthropicApiKey } = await chrome.storage.sync.get('anthropicApiKey');
-  const userKey = (anthropicApiKey || '').trim();
-  if (userKey) {
-    ui.keyStatus.textContent = '✓ using your saved key';
-    ui.keyStatus.className = 'key-status ok';
-  } else if (HAS_BUILTIN) {
-    ui.keyStatus.textContent = '✓ using built-in key';
-    ui.keyStatus.className = 'key-status ok';
-  } else {
-    ui.keyStatus.textContent = '⚠ no API key — set one below';
-    ui.keyStatus.className = 'key-status warn';
-  }
 
   if (!onWatch) {
     ui.generateBtn.disabled = true;
@@ -140,9 +86,8 @@ async function initIdle() {
     ui.videoTitle.textContent = '(refresh the YouTube tab and reopen the popup)';
   }
 
-  const hasAnyKey = !!userKey || HAS_BUILTIN;
-  ui.generateBtn.disabled = !hasAnyKey;
-  ui.generateBtn.title = hasAnyKey ? '' : 'Add a Claude API key first';
+  ui.generateBtn.disabled = false;
+  ui.generateBtn.title = '';
 }
 
 // ---------- Reattach if a job is already running ----------

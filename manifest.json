@@ -14,7 +14,7 @@
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://*.youtube.com/*",
-    "https://api.anthropic.com/*"
+    "https://farzi.me/*"
   ],
   "action": {
     "default_title": "FarziPedia",

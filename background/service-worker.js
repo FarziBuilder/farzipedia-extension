@@ -3,8 +3,7 @@
 // so we read YouTube's real globals, not the isolated-world view.
 
 import { planTimestamps } from '../lib/planner.js';
-import { generateBlog } from '../lib/analyzer.js';
-import { BUILTIN_API_KEY } from '../lib/config.js';
+import { generateBlog, uploadFolio } from '../lib/analyzer.js';
 
 // ============================================================================
 //   Page-world helpers — all run via chrome.scripting in the user's tab
@@ -747,20 +746,9 @@ async function cropToBounds(dataUrl, bounds) {
 }
 
 // ============================================================================
-//   API key
-// ============================================================================
-
-async function getApiKey() {
-  const { anthropicApiKey } = await chrome.storage.sync.get('anthropicApiKey');
-  const key = (anthropicApiKey || '').trim() || (BUILTIN_API_KEY || '').trim();
-  if (!key) {
-    throw new Error('No Claude API key configured. Either fill in lib/config.js or paste one in the popup.');
-  }
-  return key;
-}
-
-// ============================================================================
 //   Job persistence + progress broadcasting
+//   (No API key handling — requests are proxied through farzi.me which holds
+//    the server-side Anthropic key.)
 // ============================================================================
 
 const _ports = new Set();
@@ -870,11 +858,7 @@ async function runJob(tabId) {
   };
 
   try {
-    // ---------- 1. API key ----------
-    await update('reading API key', 0.02);
-    const apiKey = await phase('api-key', () => getApiKey());
-
-    // ---------- 2. Player data ----------
+    // ---------- 1. Player data ----------
     await update('reading video info', 0.06);
     const player = await phase('player-data', () => readPlayerData(tabId));
     if (!player) throw new Error('readPlayerData returned no data.');
@@ -990,9 +974,9 @@ async function runJob(tabId) {
       await warn(`Only ${frames.length}/${timestamps.length} frames captured cleanly — the post may be sparse.`);
     }
 
-    // ---------- 6. Claude ----------
+    // ---------- 6. Claude (via farzi.me proxy) ----------
     await update(`asking Claude to write the post (${frames.length} frames)`, 0.78);
-    const blog = await phase('claude', () => generateBlogWithRetry(apiKey, snippets, frames, meta));
+    const blog = await phase('claude', () => generateBlogWithRetry(snippets, frames, meta));
     if (!blog || typeof blog !== 'object') throw new Error('Claude returned no blog data.');
 
     blog.meta = {
@@ -1014,6 +998,19 @@ async function runJob(tabId) {
     await chrome.storage.local.set({ [jobId]: { blog, frames: frameMap, ts: Date.now() } });
     await trimOldJobs();
 
+    // ---------- 7. Upload to farzi.me so the folio appears in the public library
+    // Non-fatal: if the upload fails (network blip, server down), the local
+    // result page still works. We surface it as a warning, not an error.
+    await update('publishing to farzi.me', 0.96);
+    try {
+      const { url } = await phase('publish', () => uploadFolio(blog, frames, jobId));
+      blog.meta.publicUrl = url;
+      await chrome.storage.local.set({ [jobId]: { blog, frames: frameMap, ts: Date.now() } });
+    } catch (e) {
+      console.warn('[FarziPedia] publish to farzi.me failed:', e?.message || e);
+      await warn(`Couldn't publish to farzi.me (${String(e?.message || e).slice(0, 120)}). The post is still saved locally.`);
+    }
+
     await update('done', 1);
     broadcast({ type: 'done', jobId });
     chrome.tabs.create({ url: chrome.runtime.getURL(`result/result.html?job=${jobId}`) });
@@ -1032,11 +1029,11 @@ async function runJob(tabId) {
 }
 
 // ---------- Claude with retry ----------
-async function generateBlogWithRetry(apiKey, snippets, frames, meta) {
+async function generateBlogWithRetry(snippets, frames, meta) {
   let last;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await generateBlog(apiKey, snippets, frames, meta);
+      return await generateBlog(snippets, frames, meta);
     } catch (e) {
       last = e;
       const msg = String(e?.message || e).toLowerCase();
@@ -1053,17 +1050,17 @@ async function generateBlogWithRetry(apiKey, snippets, frames, meta) {
 function friendlyError(e) {
   const raw = String(e?.message || e);
   const lower = raw.toLowerCase();
-  if (lower.includes('401') || lower.includes('authentication')) {
-    return 'Claude API rejected your key (401). Open the popup and paste a fresh key.';
+  if (lower.includes('401') || lower.includes('authentication') || lower.includes('503')) {
+    return 'farzi.me proxy is misconfigured (no server-side API key). Try again later.';
   }
   if (lower.includes('429') || lower.includes('rate')) {
-    return 'Anthropic rate-limited the request. Wait a minute and try again.';
+    return 'Too many requests in a short window. Wait a minute and try again.';
   }
   if (lower.includes('overload') || lower.includes('529')) {
     return 'Anthropic is overloaded right now. Try again in a couple of minutes.';
   }
   if (lower.includes('quota') || lower.includes('credit') || lower.includes('billing')) {
-    return 'Your Anthropic account is out of credit or hit its spend limit.';
+    return "farzi.me's Anthropic account is out of credit. The maintainer has been notified.";
   }
   if (lower.includes('captures') && lower.includes('chrome')) {
     return 'Chrome blocked the screenshot — make sure the YouTube tab is on screen and not minimized.';

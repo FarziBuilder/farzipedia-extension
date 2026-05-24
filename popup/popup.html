@@ -30,26 +30,11 @@
     </div>
     <button id="generate-btn" class="primary" disabled>Render the Codex</button>
 
-    <div id="key-status" class="key-status"></div>
-
-    <details class="settings">
-      <summary>Use my own API key (overrides built-in)</summary>
-      <p class="hint">
-        FarziPedia calls Claude directly from your browser. By default it uses
-        a built-in key — but you can paste your own to bill against your own
-        account or get higher limits. Get one at
-        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
-      </p>
-      <input id="api-key" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">
-      <div class="row">
-        <label class="muted"><input type="checkbox" id="show-key"> show</label>
-        <div>
-          <button id="clear-key" class="secondary">Clear</button>
-          <button id="save-key" class="secondary">Save</button>
-        </div>
-      </div>
-      <div id="save-msg" class="muted"></div>
-    </details>
+    <p class="muted hint" style="margin-top:10px;">
+      Every folio is published to the public library at
+      <a href="https://farzi.me" target="_blank" rel="noopener">farzi.me</a>.
+      No account, no API key — the server handles Claude for you.
+    </p>
   </section>
 
   <!-- RUNNING state -->
