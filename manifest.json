@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FarziPedia",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Turn any YouTube video into a beautifully illustrated blog post — entirely in your browser.",
   "permissions": [
     "storage",
@@ -14,7 +14,8 @@
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://*.youtube.com/*",
-    "https://farzi.me/*"
+    "https://farzi.me/*",
+    "https://*.farzi.me/*"
   ],
   "action": {
     "default_title": "FarziPedia",
