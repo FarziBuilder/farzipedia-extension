@@ -611,12 +611,84 @@ async function seekAndPrepare(tabId, t) {
     const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
     if (!v) throw new Error('Video element disappeared.');
 
-    // Hide overlays
+    // Inject a stylesheet that hides every known piece of YouTube player
+    // chrome with !important. This beats:
+    //   - YouTube's own JS toggling classes (e.g. removing `.ytp-autohide`
+    //     when the video is paused, which re-shows the top title bar)
+    //   - inline-style overrides set by YouTube on chrome elements
+    // Idempotent: only adds the <style> once per tab.
+    const STYLE_ID = 'fp-hide-chrome';
+    if (!document.getElementById(STYLE_ID)) {
+      const s = document.createElement('style');
+      s.id = STYLE_ID;
+      s.textContent = `
+        /* All player overlays / chrome — anything that floats above the
+           actual <video> pixels and would leak into a captureVisibleTab. */
+        .ytp-chrome-top,
+        .ytp-chrome-top-buttons,
+        .ytp-title,
+        .ytp-title-channel,
+        .ytp-title-text,
+        .ytp-title-link,
+        .ytp-watch-later-button,
+        .ytp-share-button,
+        .ytp-overflow-button,
+        .ytp-chrome-bottom,
+        .ytp-gradient-top,
+        .ytp-gradient-bottom,
+        .ytp-cc-window-container,
+        .ytp-pause-overlay,
+        .ytp-pause-overlay-container,
+        .ytp-spinner,
+        .ytp-watermark,
+        .ytp-tooltip,
+        .ytp-bezel,
+        .ytp-bezel-text-wrapper,
+        .ytp-popup,
+        .ytp-large-play-button,
+        .ytp-cards-button,
+        .ytp-cards-teaser,
+        .ytp-ce-element,
+        .ytp-ce-covering-image,
+        .ytp-endscreen-content,
+        .ytp-info-panel-preview,
+        .ytp-impression-link,
+        .ytp-show-cards-title,
+        .ytp-paid-content-overlay,
+        .ytp-fine-scrubbing-info-bar,
+        .ytp-iv-player-content,
+        .iv-click-target,
+        .iv-branding,
+        .annotation,
+        .ytp-suggested-action,
+        .ytp-suggested-action-badge {
+          visibility: hidden !important;
+          opacity: 0 !important;
+          pointer-events: none !important;
+        }
+        /* Force "autohide" so YouTube's own CSS path also hides the chrome,
+           and never paints a cursor over the captured area. */
+        .html5-video-player,
+        .html5-video-player * {
+          cursor: none !important;
+        }
+        .html5-video-player.ytp-autohide-active .ytp-chrome-top,
+        .html5-video-player.ytp-autohide-active .ytp-chrome-bottom {
+          display: none !important;
+        }
+      `;
+      (document.head || document.documentElement).appendChild(s);
+    }
+
+    // Belt-and-suspenders: also stamp inline visibility on the elements
+    // that exist right now, so we cover any stylesheets that might load
+    // late and out-specificity our injected one.
     const HIDE_SELECTORS = [
-      '.ytp-chrome-bottom', '.ytp-cc-window-container', '.ytp-gradient-bottom',
-      '.ytp-gradient-top', '.ytp-pause-overlay', '.ytp-chrome-top',
+      '.ytp-chrome-top', '.ytp-chrome-bottom', '.ytp-gradient-top',
+      '.ytp-gradient-bottom', '.ytp-cc-window-container', '.ytp-pause-overlay',
       '.ytp-spinner', '.iv-branding', '.ytp-watermark', '.ytp-tooltip',
-      '.ytp-bezel', '.ytp-popup',
+      '.ytp-bezel', '.ytp-popup', '.ytp-large-play-button',
+      '.ytp-ce-element', '.ytp-endscreen-content', '.ytp-cards-teaser',
     ];
     for (const sel of HIDE_SELECTORS) {
       for (const el of document.querySelectorAll(sel)) {
@@ -626,6 +698,13 @@ async function seekAndPrepare(tabId, t) {
         }
       }
     }
+
+    // Force the player into autohide state so YouTube's own UI agrees.
+    const player = document.querySelector('.html5-video-player');
+    if (player) {
+      player.classList.add('ytp-autohide', 'ytp-autohide-active');
+    }
+
     v.style.cursor = 'none';
     v.pause();
 
@@ -663,10 +742,21 @@ async function seekAndPrepare(tabId, t) {
 /** Restore overlay visibility after a job completes (or fails). */
 async function restoreUi(tabId) {
   await execInPage(tabId, () => {
+    // Remove the injected !important stylesheet
+    const s = document.getElementById('fp-hide-chrome');
+    if (s) s.remove();
+    // Restore per-element inline visibility
     for (const el of document.querySelectorAll('[data-fp-hidden]')) {
       const prev = el.dataset.fpHidden;
       el.style.visibility = (prev === '__empty__' ? '' : prev) || '';
       delete el.dataset.fpHidden;
+    }
+    // Drop the force-autohide classes so the user gets normal chrome back.
+    // YouTube will re-add them naturally when the cursor goes idle.
+    const player = document.querySelector('.html5-video-player');
+    if (player) {
+      player.classList.remove('ytp-autohide-active');
+      // Leave .ytp-autohide alone — YouTube manages it via cursor events.
     }
     const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
     if (v) v.style.cursor = '';
