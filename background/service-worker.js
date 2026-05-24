@@ -1001,7 +1001,10 @@ async function runJob(tabId) {
 
     // ---------- 4. Plan timestamps ----------
     await update('planning capture moments', 0.14);
-    const maxFrames = Math.min(60, Math.max(20, Math.round(meta.duration / 60 * 3)));
+    // Cap at 25 frames so Claude can finish in well under the 300-600s
+    // proxy timeout. Each extra image is significant input + processing.
+    // Was 60; bumped down after repeated 504 timeouts on long videos.
+    const maxFrames = Math.min(25, Math.max(15, Math.round(meta.duration / 60 * 2)));
     const timestamps = await phase('plan-timestamps', () =>
       Promise.resolve(planTimestamps(snippets, meta.duration, { maxTotal: maxFrames }))
     );
