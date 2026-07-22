@@ -211,3 +211,14 @@ button.secondary:hover { background: rgba(107, 66, 32, 0.1); }
   overflow-y: auto;
   margin-bottom: 12px;
 }
+
+/* ----- Build stamp ----- */
+.build {
+  margin-top: 12px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--sepia);
+  opacity: 0.6;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}

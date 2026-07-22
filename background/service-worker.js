@@ -3,7 +3,10 @@
 // so we read YouTube's real globals, not the isolated-world view.
 
 import { planTimestamps } from '../lib/planner.js';
-import { generateBlog, uploadFolio } from '../lib/analyzer.js';
+import { generateBlog, uploadFolio, MODEL } from '../lib/analyzer.js';
+import { BUILTIN_API_KEY } from '../lib/config.js';
+
+console.log(`[FarziPedia] service worker v${chrome.runtime.getManifest().version} · model ${MODEL}`);
 
 // ============================================================================
 //   Page-world helpers — all run via chrome.scripting in the user's tab
@@ -611,103 +614,12 @@ async function seekAndPrepare(tabId, t) {
     const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
     if (!v) throw new Error('Video element disappeared.');
 
-    // Inject a stylesheet that hides every known piece of YouTube player
-    // chrome with !important. This beats:
-    //   - YouTube's own JS toggling classes (e.g. removing `.ytp-autohide`
-    //     when the video is paused, which re-shows the top title bar)
-    //   - inline-style overrides set by YouTube on chrome elements
-    // Idempotent: only adds the <style> once per tab.
-    const STYLE_ID = 'fp-hide-chrome';
-    if (!document.getElementById(STYLE_ID)) {
-      const s = document.createElement('style');
-      s.id = STYLE_ID;
-      s.textContent = `
-        /* === YouTube site-level chrome (ytd-* custom elements) ===
-           These are position:fixed at the top of the viewport and visually
-           overlap the top of the <video> element, so they leak into a
-           captureVisibleTab crop of the video bounds. Use display:none
-           so they're removed from the paint tree entirely. */
-        ytd-masthead,
-        #masthead-container,
-        #masthead,
-        tp-yt-app-header,
-        tp-yt-iron-overlay-backdrop,
-        ytd-popup-container,
-        ytd-mealbar-promo-renderer,
-        ytd-button-renderer.style-scope.ytd-masthead,
-        #consent-bump-v2-lightbox,
-        ytd-consent-bump-v2-lightbox,
-        ytd-engagement-panel-section-list-renderer[modern-panels] {
-          display: none !important;
-        }
-
-        /* === In-player chrome === Hidden via visibility so the player
-           keeps its layout (some code reads the player rect). */
-        .ytp-chrome-top,
-        .ytp-chrome-top-buttons,
-        .ytp-title,
-        .ytp-title-channel,
-        .ytp-title-text,
-        .ytp-title-link,
-        .ytp-watch-later-button,
-        .ytp-share-button,
-        .ytp-overflow-button,
-        .ytp-chrome-bottom,
-        .ytp-gradient-top,
-        .ytp-gradient-bottom,
-        .ytp-cc-window-container,
-        .ytp-pause-overlay,
-        .ytp-pause-overlay-container,
-        .ytp-spinner,
-        .ytp-watermark,
-        .ytp-tooltip,
-        .ytp-bezel,
-        .ytp-bezel-text-wrapper,
-        .ytp-popup,
-        .ytp-large-play-button,
-        .ytp-cards-button,
-        .ytp-cards-teaser,
-        .ytp-ce-element,
-        .ytp-ce-covering-image,
-        .ytp-endscreen-content,
-        .ytp-info-panel-preview,
-        .ytp-impression-link,
-        .ytp-show-cards-title,
-        .ytp-paid-content-overlay,
-        .ytp-fine-scrubbing-info-bar,
-        .ytp-iv-player-content,
-        .iv-click-target,
-        .iv-branding,
-        .annotation,
-        .ytp-suggested-action,
-        .ytp-suggested-action-badge {
-          visibility: hidden !important;
-          opacity: 0 !important;
-          pointer-events: none !important;
-        }
-        /* Force "autohide" so YouTube's own CSS path also hides the chrome,
-           and never paints a cursor over the captured area. */
-        .html5-video-player,
-        .html5-video-player * {
-          cursor: none !important;
-        }
-        .html5-video-player.ytp-autohide-active .ytp-chrome-top,
-        .html5-video-player.ytp-autohide-active .ytp-chrome-bottom {
-          display: none !important;
-        }
-      `;
-      (document.head || document.documentElement).appendChild(s);
-    }
-
-    // Belt-and-suspenders: also stamp inline visibility on the elements
-    // that exist right now, so we cover any stylesheets that might load
-    // late and out-specificity our injected one.
+    // Hide overlays
     const HIDE_SELECTORS = [
-      '.ytp-chrome-top', '.ytp-chrome-bottom', '.ytp-gradient-top',
-      '.ytp-gradient-bottom', '.ytp-cc-window-container', '.ytp-pause-overlay',
+      '.ytp-chrome-bottom', '.ytp-cc-window-container', '.ytp-gradient-bottom',
+      '.ytp-gradient-top', '.ytp-pause-overlay', '.ytp-chrome-top',
       '.ytp-spinner', '.iv-branding', '.ytp-watermark', '.ytp-tooltip',
-      '.ytp-bezel', '.ytp-popup', '.ytp-large-play-button',
-      '.ytp-ce-element', '.ytp-endscreen-content', '.ytp-cards-teaser',
+      '.ytp-bezel', '.ytp-popup',
     ];
     for (const sel of HIDE_SELECTORS) {
       for (const el of document.querySelectorAll(sel)) {
@@ -717,13 +629,6 @@ async function seekAndPrepare(tabId, t) {
         }
       }
     }
-
-    // Force the player into autohide state so YouTube's own UI agrees.
-    const player = document.querySelector('.html5-video-player');
-    if (player) {
-      player.classList.add('ytp-autohide', 'ytp-autohide-active');
-    }
-
     v.style.cursor = 'none';
     v.pause();
 
@@ -761,21 +666,10 @@ async function seekAndPrepare(tabId, t) {
 /** Restore overlay visibility after a job completes (or fails). */
 async function restoreUi(tabId) {
   await execInPage(tabId, () => {
-    // Remove the injected !important stylesheet
-    const s = document.getElementById('fp-hide-chrome');
-    if (s) s.remove();
-    // Restore per-element inline visibility
     for (const el of document.querySelectorAll('[data-fp-hidden]')) {
       const prev = el.dataset.fpHidden;
       el.style.visibility = (prev === '__empty__' ? '' : prev) || '';
       delete el.dataset.fpHidden;
-    }
-    // Drop the force-autohide classes so the user gets normal chrome back.
-    // YouTube will re-add them naturally when the cursor goes idle.
-    const player = document.querySelector('.html5-video-player');
-    if (player) {
-      player.classList.remove('ytp-autohide-active');
-      // Leave .ytp-autohide alone — YouTube manages it via cursor events.
     }
     const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
     if (v) v.style.cursor = '';
@@ -855,9 +749,20 @@ async function cropToBounds(dataUrl, bounds) {
 }
 
 // ============================================================================
+//   API key
+// ============================================================================
+
+async function getApiKey() {
+  const { anthropicApiKey } = await chrome.storage.sync.get('anthropicApiKey');
+  const key = (anthropicApiKey || '').trim() || (BUILTIN_API_KEY || '').trim();
+  if (!key) {
+    throw new Error('No Claude API key configured. Either fill in lib/config.js or paste one in the popup.');
+  }
+  return key;
+}
+
+// ============================================================================
 //   Job persistence + progress broadcasting
-//   (No API key handling — requests are proxied through farzi.me which holds
-//    the server-side Anthropic key.)
 // ============================================================================
 
 const _ports = new Set();
@@ -967,7 +872,11 @@ async function runJob(tabId) {
   };
 
   try {
-    // ---------- 1. Player data ----------
+    // ---------- 1. API key ----------
+    await update('reading API key', 0.02);
+    const apiKey = await phase('api-key', () => getApiKey());
+
+    // ---------- 2. Player data ----------
     await update('reading video info', 0.06);
     const player = await phase('player-data', () => readPlayerData(tabId));
     if (!player) throw new Error('readPlayerData returned no data.');
@@ -1001,10 +910,7 @@ async function runJob(tabId) {
 
     // ---------- 4. Plan timestamps ----------
     await update('planning capture moments', 0.14);
-    // Cap at 25 frames so Claude can finish in well under the 300-600s
-    // proxy timeout. Each extra image is significant input + processing.
-    // Was 60; bumped down after repeated 504 timeouts on long videos.
-    const maxFrames = Math.min(25, Math.max(15, Math.round(meta.duration / 60 * 2)));
+    const maxFrames = Math.min(60, Math.max(20, Math.round(meta.duration / 60 * 3)));
     const timestamps = await phase('plan-timestamps', () =>
       Promise.resolve(planTimestamps(snippets, meta.duration, { maxTotal: maxFrames }))
     );
@@ -1086,9 +992,9 @@ async function runJob(tabId) {
       await warn(`Only ${frames.length}/${timestamps.length} frames captured cleanly — the post may be sparse.`);
     }
 
-    // ---------- 6. Claude (via farzi.me proxy) ----------
+    // ---------- 6. Claude ----------
     await update(`asking Claude to write the post (${frames.length} frames)`, 0.78);
-    const blog = await phase('claude', () => generateBlogWithRetry(snippets, frames, meta));
+    const blog = await phase('claude', () => generateBlogWithRetry(apiKey, snippets, frames, meta));
     if (!blog || typeof blog !== 'object') throw new Error('Claude returned no blog data.');
 
     blog.meta = {
@@ -1141,11 +1047,11 @@ async function runJob(tabId) {
 }
 
 // ---------- Claude with retry ----------
-async function generateBlogWithRetry(snippets, frames, meta) {
+async function generateBlogWithRetry(apiKey, snippets, frames, meta) {
   let last;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await generateBlog(snippets, frames, meta);
+      return await generateBlog(apiKey, snippets, frames, meta);
     } catch (e) {
       last = e;
       const msg = String(e?.message || e).toLowerCase();
@@ -1162,17 +1068,17 @@ async function generateBlogWithRetry(snippets, frames, meta) {
 function friendlyError(e) {
   const raw = String(e?.message || e);
   const lower = raw.toLowerCase();
-  if (lower.includes('401') || lower.includes('authentication') || lower.includes('503')) {
-    return 'farzi.me proxy is misconfigured (no server-side API key). Try again later.';
+  if (lower.includes('401') || lower.includes('authentication')) {
+    return 'Claude API rejected your key (401). Open the popup and paste a fresh key.';
   }
   if (lower.includes('429') || lower.includes('rate')) {
-    return 'Too many requests in a short window. Wait a minute and try again.';
+    return 'Anthropic rate-limited the request. Wait a minute and try again.';
   }
   if (lower.includes('overload') || lower.includes('529')) {
     return 'Anthropic is overloaded right now. Try again in a couple of minutes.';
   }
   if (lower.includes('quota') || lower.includes('credit') || lower.includes('billing')) {
-    return "farzi.me's Anthropic account is out of credit. The maintainer has been notified.";
+    return 'Your Anthropic account is out of credit or hit its spend limit.';
   }
   if (lower.includes('captures') && lower.includes('chrome')) {
     return 'Chrome blocked the screenshot — make sure the YouTube tab is on screen and not minimized.';
