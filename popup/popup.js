@@ -23,6 +23,10 @@ const ui = {
   saveKey:      $('save-key'),
   clearKey:     $('clear-key'),
   saveMsg:      $('save-msg'),
+  playlistBox:  $('playlist-box'),
+  playlistUrl:  $('playlist-url'),
+  playlistInfo: $('playlist-info'),
+  playlistBtn:  $('playlist-btn'),
   bar:          $('bar'),
   status:       $('status'),
   elapsed:      $('elapsed'),
@@ -106,6 +110,15 @@ async function initIdle() {
     ui.keyStatus.className = 'key-status warn';
   }
 
+  const hasAnyKey = !!userKey || HAS_BUILTIN;
+  ui.playlistBtn.disabled = !hasAnyKey;
+
+  // Pre-fill the playlist box when the current tab already carries a list id.
+  if (tab && /[?&]list=/.test(tab.url || '') && !ui.playlistUrl.value) {
+    ui.playlistUrl.value = tab.url;
+    ui.playlistBox.open = true;
+  }
+
   if (!onWatch) {
     ui.generateBtn.disabled = true;
     return;
@@ -141,7 +154,6 @@ async function initIdle() {
     ui.videoTitle.textContent = '(refresh the YouTube tab and reopen the popup)';
   }
 
-  const hasAnyKey = !!userKey || HAS_BUILTIN;
   ui.generateBtn.disabled = !hasAnyKey;
   ui.generateBtn.title = hasAnyKey ? '' : 'Add a Claude API key first';
 }
@@ -220,6 +232,30 @@ ui.generateBtn.addEventListener('click', async () => {
   showRunning();
   startListeningForProgress();
   await chrome.runtime.sendMessage({ type: 'START_JOB', tabId: tab.id });
+});
+
+// ---------- Playlist ----------
+
+ui.playlistBtn.addEventListener('click', async () => {
+  const tab = await getActiveTab();
+  if (!tab) return;
+  const playlistUrl = ui.playlistUrl.value.trim();
+  if (!playlistUrl) { ui.playlistInfo.textContent = 'Paste a playlist link first.'; return; }
+
+  ui.playlistBtn.disabled = true;
+  ui.playlistInfo.textContent = 'reading playlist…';
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'GET_PLAYLIST_INFO', playlistUrl });
+    if (!res?.ok) { ui.playlistInfo.textContent = res?.error || 'Could not read that playlist.'; return; }
+    const { count, title } = res.data;
+    if (!count) { ui.playlistInfo.textContent = 'That playlist has no videos (is it public?).'; return; }
+    ui.playlistInfo.textContent = `${count} videos · ${title || 'untitled'}`;
+    showRunning();
+    startListeningForProgress();
+    await chrome.runtime.sendMessage({ type: 'START_PLAYLIST_JOB', tabId: tab.id, playlistUrl });
+  } finally {
+    ui.playlistBtn.disabled = false;
+  }
 });
 
 ui.retryBtn.addEventListener('click', () => initIdle());

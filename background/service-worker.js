@@ -4,7 +4,7 @@
 
 import { planTimestamps } from '../lib/planner.js';
 import { generateBlog, uploadFolio, MODEL } from '../lib/analyzer.js';
-import { BUILTIN_API_KEY } from '../lib/config.js';
+import { BUILTIN_API_KEY, FARZIPEDIA_BASE_URL } from '../lib/config.js';
 
 console.log(`[FarziPedia] service worker v${chrome.runtime.getManifest().version} · model ${MODEL}`);
 
@@ -840,42 +840,13 @@ async function phase(name, fn) {
   }
 }
 
-async function runJob(tabId) {
-  if (_state) {
-    broadcast({ type: 'error', message: 'A job is already running. Wait for it to finish.' });
-    return;
-  }
-
-  startHeartbeat();
-  const t0 = Date.now();
-  const elapsed = () => Math.round((Date.now() - t0) / 1000);
-
-  await setState({
-    status: 'running', message: 'starting…', frac: 0, elapsed: 0,
-    warnings: [], tabId,
-  });
-  broadcast({ type: 'progress', message: 'starting…', frac: 0, elapsed: 0 });
-
-  let tab;
-  try { tab = await chrome.tabs.get(tabId); }
-  catch { broadcast({ type: 'error', message: 'YouTube tab is gone.' }); await clearState(); stopHeartbeat(); return; }
-  const windowId = tab.windowId;
-
-  const update = async (message, frac) => {
-    await setState({ message, frac, elapsed: elapsed() });
-    broadcast({ type: 'progress', message, frac, elapsed: elapsed() });
-  };
-  const warn = async (message) => {
-    const ws = (_state?.warnings || []).concat([message]).slice(-30);
-    await setState({ warnings: ws });
-    broadcast({ type: 'warning', message });
-  };
-
-  try {
-    // ---------- 1. API key ----------
-    await update('reading API key', 0.02);
-    const apiKey = await phase('api-key', () => getApiKey());
-
+/**
+ * Process the video currently loaded in `tabId`: read → transcript → frames →
+ * Claude → publish. Throws on failure. Progress flows through the provided
+ * `update`/`warn` callbacks so single-video and playlist runs can scale it.
+ * Returns { jobId, publicUrl, title }.
+ */
+async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = null }) {
     // ---------- 2. Player data ----------
     await update('reading video info', 0.06);
     const player = await phase('player-data', () => readPlayerData(tabId));
@@ -1021,7 +992,7 @@ async function runJob(tabId) {
     // result page still works. We surface it as a warning, not an error.
     await update('publishing to farzi.me', 0.96);
     try {
-      const { url } = await phase('publish', () => uploadFolio(blog, frames, jobId));
+      const { url } = await phase('publish', () => uploadFolio(blog, frames, jobId, repoName));
       blog.meta.publicUrl = url;
       await chrome.storage.local.set({ [jobId]: { blog, frames: frameMap, ts: Date.now() } });
     } catch (e) {
@@ -1029,9 +1000,55 @@ async function runJob(tabId) {
       await warn(`Couldn't publish to farzi.me (${String(e?.message || e).slice(0, 120)}). The post is still saved locally.`);
     }
 
+    return { jobId, publicUrl: blog.meta.publicUrl || null, title: meta.title };
+}
+
+// ---------- Single-video job ----------
+
+async function runJob(tabId) {
+  if (_state) {
+    broadcast({ type: 'error', message: 'A job is already running. Wait for it to finish.' });
+    return;
+  }
+
+  startHeartbeat();
+  const t0 = Date.now();
+  const elapsed = () => Math.round((Date.now() - t0) / 1000);
+
+  await setState({
+    status: 'running', message: 'starting…', frac: 0, elapsed: 0,
+    warnings: [], tabId,
+  });
+  broadcast({ type: 'progress', message: 'starting…', frac: 0, elapsed: 0 });
+
+  let tab;
+  try { tab = await chrome.tabs.get(tabId); }
+  catch { broadcast({ type: 'error', message: 'YouTube tab is gone.' }); await clearState(); stopHeartbeat(); return; }
+  const windowId = tab.windowId;
+
+  const update = async (message, frac) => {
+    await setState({ message, frac, elapsed: elapsed() });
+    broadcast({ type: 'progress', message, frac, elapsed: elapsed() });
+  };
+  const warn = async (message) => {
+    const ws = (_state?.warnings || []).concat([message]).slice(-30);
+    await setState({ warnings: ws });
+    broadcast({ type: 'warning', message });
+  };
+
+  try {
+    await update('reading API key', 0.02);
+    const apiKey = await phase('api-key', () => getApiKey());
+
+    const res = await processVideo(tabId, windowId, { apiKey, update, warn });
+
     await update('done', 1);
-    broadcast({ type: 'done', jobId });
-    chrome.tabs.create({ url: chrome.runtime.getURL(`result/result.html?job=${jobId}`) });
+    broadcast({ type: 'done', jobId: res.jobId });
+    // Send the reader to the folio's public farzi.me page; the local result
+    // page is only the fallback for when publishing failed.
+    chrome.tabs.create({
+      url: res.publicUrl || chrome.runtime.getURL(`result/result.html?job=${res.jobId}`),
+    });
   } catch (e) {
     console.error('[FarziPedia] job failed:', e?.message || e);
     if (e?._stepName) console.error('  in step:', e._stepName);
@@ -1041,6 +1058,162 @@ async function runJob(tabId) {
     const stepHint = e?._stepName ? ` (during "${e._stepName}")` : '';
     broadcast({ type: 'error', message: friendlyError(e) + stepHint });
   } finally {
+    await clearState();
+    stopHeartbeat();
+  }
+}
+
+// ============================================================================
+//   Playlist job — walk every video in a playlist through the same pipeline
+// ============================================================================
+
+/** Extract a playlist id from any YouTube URL. Rejects mixes/radio (RD…). */
+function parsePlaylistId(url) {
+  const m = /[?&]list=([A-Za-z0-9_-]{10,})/.exec(url || '');
+  if (!m) return null;
+  if (/^(RD|UL)/.test(m[1])) return null; // auto-generated mixes can't be listed
+  return m[1];
+}
+
+/** Fetch the playlist page and pull ordered video ids + the playlist title. */
+async function fetchPlaylistVideos(listId) {
+  const res = await fetch(`https://www.youtube.com/playlist?list=${listId}&hl=en`, {
+    credentials: 'omit',
+  });
+  if (!res.ok) throw new Error(`Could not load the playlist page (HTTP ${res.status}).`);
+  const html = await res.text();
+
+  // YouTube has shipped several playlist markups; try them newest-first and
+  // keep the first pattern that yields anything. All preserve playlist order.
+  const patterns = [
+    /"playlistVideoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})"/g, // classic markup
+    /"contentId":"([A-Za-z0-9_-]{11})"/g,                         // 2026 lockupViewModel markup
+    /"videoId":"([A-Za-z0-9_-]{11})"/g,                           // last-resort fallback
+  ];
+  let ids = [];
+  for (const re of patterns) {
+    const seen = new Set();
+    const found = [];
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      if (!seen.has(m[1])) { seen.add(m[1]); found.push(m[1]); }
+    }
+    if (found.length) { ids = found; break; }
+  }
+
+  let title = '';
+  const tm = /<title>([^<]*)<\/title>/.exec(html);
+  if (tm) title = decodeHtmlEntities(tm[1]).replace(/\s*-\s*YouTube\s*$/, '').trim();
+
+  return { ids, title };
+}
+
+/** After navigating, wait until the watch page + player are actually ready. */
+async function waitForWatchPage(tabId, videoId, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) throw new Error('YouTube tab was closed.');
+    if (tab.status === 'complete' && (tab.url || '').includes(videoId)) {
+      const ready = await execInPage(tabId, () => {
+        const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
+        return !!(v && v.readyState >= 2 && v.duration > 0);
+      }).catch(() => false);
+      if (ready) {
+        const pd = await readPlayerData(tabId).catch(() => null);
+        if (pd?.videoDetails?.videoId === videoId) return;
+      }
+    }
+    await sleep(1000);
+  }
+  throw new Error('Timed out waiting for the video page to load.');
+}
+
+const PLAYLIST_MAX_VIDEOS = 50;
+
+async function runPlaylistJob(tabId, playlistUrl) {
+  if (_state) {
+    broadcast({ type: 'error', message: 'A job is already running. Wait for it to finish.' });
+    return;
+  }
+  const listId = parsePlaylistId(playlistUrl);
+  if (!listId) {
+    broadcast({ type: 'error', message: 'That link has no usable playlist id (auto-generated mixes aren\'t supported).' });
+    return;
+  }
+
+  startHeartbeat();
+  const t0 = Date.now();
+  const elapsed = () => Math.round((Date.now() - t0) / 1000);
+
+  await setState({
+    status: 'running', message: 'reading playlist…', frac: 0, elapsed: 0,
+    warnings: [], tabId, playlist: listId,
+  });
+  broadcast({ type: 'progress', message: 'reading playlist…', frac: 0, elapsed: 0 });
+
+  const update = async (message, frac) => {
+    await setState({ message, frac, elapsed: elapsed() });
+    broadcast({ type: 'progress', message, frac, elapsed: elapsed() });
+  };
+  const warn = async (message) => {
+    const ws = (_state?.warnings || []).concat([message]).slice(-30);
+    await setState({ warnings: ws });
+    broadcast({ type: 'warning', message });
+  };
+
+  let muted = false;
+  try {
+    const apiKey = await phase('api-key', () => getApiKey());
+
+    const { ids, title } = await phase('playlist', () => fetchPlaylistVideos(listId));
+    if (!ids.length) throw new Error('No videos found in that playlist — is it public?');
+    const videos = ids.slice(0, PLAYLIST_MAX_VIDEOS);
+    if (ids.length > videos.length) {
+      await warn(`Playlist has ${ids.length} videos — processing the first ${videos.length}.`);
+    }
+    const repoName = (title || `Playlist ${listId}`).slice(0, 120);
+    await update(`playlist "${repoName}" — ${videos.length} videos`, 0.01);
+
+    // Spare the user's ears while the tab hops from video to video.
+    try { await chrome.tabs.update(tabId, { muted: true }); muted = true; } catch {}
+
+    const published = [];
+    for (let i = 0; i < videos.length; i++) {
+      const vid = videos[i];
+      const base = i / videos.length;
+      const span = 1 / videos.length;
+      const scopedUpdate = (message, frac) =>
+        update(`[video ${i + 1}/${videos.length}] ${message}`, base + span * Math.min(0.99, frac || 0));
+      try {
+        await scopedUpdate('loading video page', 0);
+        await chrome.tabs.update(tabId, { url: `https://www.youtube.com/watch?v=${vid}` });
+        await waitForWatchPage(tabId, vid);
+        await sleep(1500); // let the player settle
+
+        const tab = await chrome.tabs.get(tabId);
+        const res = await processVideo(tabId, tab.windowId, {
+          apiKey, update: scopedUpdate, warn, repoName,
+        });
+        published.push(res);
+      } catch (e) {
+        console.warn(`[FarziPedia] playlist video ${vid} failed:`, e?.message || e);
+        await warn(`Video ${i + 1}/${videos.length} failed — ${friendlyError(e).slice(0, 140)}`);
+        try { await restoreUi(tabId); } catch {}
+      }
+    }
+
+    if (!published.length) {
+      throw new Error('Every video in the playlist failed — see the warnings above.');
+    }
+    await update(`done — ${published.length}/${videos.length} folios published to "${repoName}"`, 1);
+    broadcast({ type: 'done', jobId: published[published.length - 1].jobId });
+    chrome.tabs.create({ url: `${FARZIPEDIA_BASE_URL}/` });
+  } catch (e) {
+    console.error('[FarziPedia] playlist job failed:', e?.message || e);
+    broadcast({ type: 'error', message: friendlyError(e) });
+  } finally {
+    if (muted) { try { await chrome.tabs.update(tabId, { muted: false }); } catch {} }
     await clearState();
     stopHeartbeat();
   }
@@ -1100,6 +1273,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // fire-and-forget so popup gets immediate ack
           runJob(msg.tabId);
           sendResponse({ ok: true });
+          return;
+        }
+        case 'START_PLAYLIST_JOB': {
+          if (!msg.tabId) throw new Error('Missing tabId');
+          if (!msg.playlistUrl) throw new Error('Missing playlistUrl');
+          runPlaylistJob(msg.tabId, msg.playlistUrl);
+          sendResponse({ ok: true });
+          return;
+        }
+        case 'GET_PLAYLIST_INFO': {
+          const listId = parsePlaylistId(msg.playlistUrl);
+          if (!listId) throw new Error('No playlist id in that link (mixes/radios aren\'t supported).');
+          const { ids, title } = await fetchPlaylistVideos(listId);
+          sendResponse({ ok: true, data: { count: ids.length, title, listId } });
           return;
         }
         case 'GET_VIDEO_INFO': {
