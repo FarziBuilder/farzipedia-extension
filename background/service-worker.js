@@ -827,6 +827,15 @@ async function trimOldJobs(keepCount = 5) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+/** Race a promise against a timeout. Guards against page-side waits that can
+ * never settle (e.g. requestAnimationFrame is paused in a hidden tab). */
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
+  ]);
+}
+
 /** Wrap a phase so any thrown error includes which named step it came from. */
 async function phase(name, fn) {
   try {
@@ -846,7 +855,7 @@ async function phase(name, fn) {
  * `update`/`warn` callbacks so single-video and playlist runs can scale it.
  * Returns { jobId, publicUrl, title }.
  */
-async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = null }) {
+async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = null, trimKeep = 5 }) {
     // ---------- 2. Player data ----------
     await update('reading video info', 0.06);
     const player = await phase('player-data', () => readPlayerData(tabId));
@@ -918,7 +927,8 @@ async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = 
             continue;
           }
 
-          const bounds = await seekAndPrepare(tabId, t);
+          const bounds = await withTimeout(seekAndPrepare(tabId, t), 20_000,
+            'seek+render timed out — keep the YouTube tab visible');
           await sleep(120); // settle after seek
 
           const dataUrl = await captureTab(windowId);
@@ -931,7 +941,8 @@ async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = 
             // Nudge to a slightly different timestamp on retry
             await sleep(150);
             const nudged = t + (attempt === 0 ? 1.5 : -1.5);
-            const newBounds = await seekAndPrepare(tabId, Math.max(0.5, nudged));
+            const newBounds = await withTimeout(seekAndPrepare(tabId, Math.max(0.5, nudged)), 20_000,
+              'seek+render timed out — keep the YouTube tab visible');
             await sleep(120);
             const altUrl = await captureTab(windowId);
             const altCrop = await cropToBounds(altUrl, newBounds);
@@ -985,7 +996,7 @@ async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = 
 
     const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await chrome.storage.local.set({ [jobId]: { blog, frames: frameMap, ts: Date.now() } });
-    await trimOldJobs();
+    await trimOldJobs(trimKeep);
 
     // ---------- 7. Upload to farzi.me so the folio appears in the public library
     // Non-fatal: if the upload fails (network blip, server down), the local
@@ -1085,10 +1096,11 @@ async function fetchPlaylistVideos(listId) {
 
   // YouTube has shipped several playlist markups; try them newest-first and
   // keep the first pattern that yields anything. All preserve playlist order.
+  // No looser fallback on purpose: a bare "videoId" scan can pull unrelated
+  // ids from the page and burn API credits on videos that aren't in the list.
   const patterns = [
     /"playlistVideoRenderer":\{"videoId":"([A-Za-z0-9_-]{11})"/g, // classic markup
     /"contentId":"([A-Za-z0-9_-]{11})"/g,                         // 2026 lockupViewModel markup
-    /"videoId":"([A-Za-z0-9_-]{11})"/g,                           // last-resort fallback
   ];
   let ids = [];
   for (const re of patterns) {
@@ -1194,9 +1206,17 @@ async function runPlaylistJob(tabId, playlistUrl) {
         const tab = await chrome.tabs.get(tabId);
         const res = await processVideo(tabId, tab.windowId, {
           apiKey, update: scopedUpdate, warn, repoName,
+          trimKeep: videos.length + 5, // don't evict earlier videos of this run
         });
         published.push(res);
       } catch (e) {
+        // If the tab itself is gone, the user killed the run — stop cleanly
+        // instead of grinding through every remaining video.
+        const stillThere = await chrome.tabs.get(tabId).catch(() => null);
+        if (!stillThere) {
+          await warn(`Stopped at video ${i + 1}/${videos.length} — the YouTube tab was closed.`);
+          break;
+        }
         console.warn(`[FarziPedia] playlist video ${vid} failed:`, e?.message || e);
         await warn(`Video ${i + 1}/${videos.length} failed — ${friendlyError(e).slice(0, 140)}`);
         try { await restoreUi(tabId); } catch {}
@@ -1206,7 +1226,11 @@ async function runPlaylistJob(tabId, playlistUrl) {
     if (!published.length) {
       throw new Error('Every video in the playlist failed — see the warnings above.');
     }
-    await update(`done — ${published.length}/${videos.length} folios published to "${repoName}"`, 1);
+    const uploaded = published.filter(r => r.publicUrl);
+    if (uploaded.length < published.length) {
+      await warn(`${published.length - uploaded.length} folio(s) were generated but couldn't be published — they're saved locally in the extension.`);
+    }
+    await update(`done — ${uploaded.length}/${videos.length} folios published to "${repoName}"`, 1);
     broadcast({ type: 'done', jobId: published[published.length - 1].jobId });
     chrome.tabs.create({ url: `${FARZIPEDIA_BASE_URL}/` });
   } catch (e) {
