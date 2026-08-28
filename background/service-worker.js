@@ -1230,7 +1230,7 @@ async function runPlaylistJob(tabId, playlistUrl) {
     if (uploaded.length < published.length) {
       await warn(`${published.length - uploaded.length} folio(s) were generated but couldn't be published — they're saved locally in the extension.`);
     }
-    await update(`done — ${uploaded.length}/${videos.length} folios filed in the "${repoName}" scrinium`, 1);
+    await update(`done — ${uploaded.length}/${videos.length} folios bound into the "${repoName}" tome`, 1);
     broadcast({ type: 'done', jobId: published[published.length - 1].jobId });
     chrome.tabs.create({ url: `${FARZIPEDIA_BASE_URL}/` });
   } catch (e) {
