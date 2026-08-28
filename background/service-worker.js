@@ -3,8 +3,8 @@
 // so we read YouTube's real globals, not the isolated-world view.
 
 import { planTimestamps } from '../lib/planner.js';
-import { generateBlog, uploadFolio, MODEL } from '../lib/analyzer.js';
-import { BUILTIN_API_KEY, FARZIPEDIA_BASE_URL } from '../lib/config.js';
+import { generateBlog, uploadFolio, resolveFarziBase, MODEL } from '../lib/analyzer.js';
+import { BUILTIN_API_KEY } from '../lib/config.js';
 
 console.log(`[FarziPedia] service worker v${chrome.runtime.getManifest().version} · model ${MODEL}`);
 
@@ -1232,7 +1232,7 @@ async function runPlaylistJob(tabId, playlistUrl) {
     }
     await update(`done — ${uploaded.length}/${videos.length} folios bound into the "${repoName}" tome`, 1);
     broadcast({ type: 'done', jobId: published[published.length - 1].jobId });
-    chrome.tabs.create({ url: `${FARZIPEDIA_BASE_URL}/` });
+    chrome.tabs.create({ url: `${await resolveFarziBase()}/` });
   } catch (e) {
     console.error('[FarziPedia] playlist job failed:', e?.message || e);
     broadcast({ type: 'error', message: friendlyError(e) });

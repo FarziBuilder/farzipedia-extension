@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FarziPedia",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Turn any YouTube video into a beautifully illustrated blog post — entirely in your browser.",
   "permissions": [
     "storage",
@@ -16,7 +16,9 @@
     "https://*.youtube.com/*",
     "https://api.anthropic.com/*",
     "https://farzi.me/*",
-    "https://*.farzi.me/*"
+    "https://*.farzi.me/*",
+    "https://farzipedia.com/*",
+    "https://*.farzipedia.com/*"
   ],
   "action": {
     "default_title": "FarziPedia",
