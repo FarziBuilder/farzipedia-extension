@@ -246,13 +246,28 @@ ui.playlistBtn.addEventListener('click', async () => {
   ui.playlistInfo.textContent = 'reading playlist…';
   try {
     const res = await chrome.runtime.sendMessage({ type: 'GET_PLAYLIST_INFO', playlistUrl });
-    if (!res?.ok) { ui.playlistInfo.textContent = res?.error || 'Could not read that playlist.'; return; }
+    if (!res?.ok) {
+      const err = res?.error || 'Could not read that playlist.';
+      if (/unknown message type/i.test(err)) {
+        // The popup was re-read from disk but the old service worker is still
+        // registered. Reload the whole extension so the new worker takes over.
+        ui.playlistInfo.textContent = 'Extension updated — rebinding the quill… reopen the popup.';
+        setTimeout(() => chrome.runtime.reload(), 800);
+        return;
+      }
+      ui.playlistInfo.textContent = err;
+      return;
+    }
     const { count, title } = res.data;
     if (!count) { ui.playlistInfo.textContent = 'That playlist has no videos (is it public?).'; return; }
     ui.playlistInfo.textContent = `${count} videos · ${title || 'untitled'}`;
     showRunning();
     startListeningForProgress();
     await chrome.runtime.sendMessage({ type: 'START_PLAYLIST_JOB', tabId: tab.id, playlistUrl });
+  } catch (e) {
+    // No listener at all (worker crashed or mid-update) — same remedy.
+    ui.playlistInfo.textContent = 'Extension needs a reload — rebinding the quill… reopen the popup.';
+    setTimeout(() => chrome.runtime.reload(), 800);
   } finally {
     ui.playlistBtn.disabled = false;
   }
