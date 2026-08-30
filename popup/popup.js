@@ -27,6 +27,8 @@ const ui = {
   playlistUrl:  $('playlist-url'),
   playlistInfo: $('playlist-info'),
   playlistBtn:  $('playlist-btn'),
+  lastrunBox:   $('lastrun-box'),
+  lastrunBody:  $('lastrun-body'),
   bar:          $('bar'),
   status:       $('status'),
   elapsed:      $('elapsed'),
@@ -113,6 +115,18 @@ async function initIdle() {
   const hasAnyKey = !!userKey || HAS_BUILTIN;
   ui.playlistBtn.disabled = !hasAnyKey;
 
+  // Post-mortem of the most recent run — the live warnings vanish when a run
+  // ends, so a failed run leaves its chronicle here for the curious.
+  try {
+    const { __farzi_lastrun: lastrun } = await chrome.storage.local.get('__farzi_lastrun');
+    if (lastrun && !lastrun.ok) {
+      renderLastRun(lastrun);
+      ui.lastrunBox.classList.remove('hidden');
+    } else {
+      ui.lastrunBox.classList.add('hidden');
+    }
+  } catch {}
+
   // Pre-fill the playlist box when the current tab already carries a list id.
   if (tab && /[?&]list=/.test(tab.url || '') && !ui.playlistUrl.value) {
     ui.playlistUrl.value = tab.url;
@@ -156,6 +170,23 @@ async function initIdle() {
 
   ui.generateBtn.disabled = !hasAnyKey;
   ui.generateBtn.title = hasAnyKey ? '' : 'Add a Claude API key first';
+}
+
+function renderLastRun(lastrun) {
+  ui.lastrunBody.innerHTML = '';
+  const when = new Date(lastrun.finishedAt || 0);
+  const head = document.createElement('p');
+  head.textContent = `${lastrun.kind === 'playlist' ? 'Playlist run' : 'Run'} failed at ${when.toLocaleTimeString()}: ${lastrun.error || 'unknown error'}`;
+  ui.lastrunBody.appendChild(head);
+  if (lastrun.warnings?.length) {
+    const ul = document.createElement('ul');
+    for (const w of lastrun.warnings) {
+      const li = document.createElement('li');
+      li.textContent = w;
+      ul.appendChild(li);
+    }
+    ui.lastrunBody.appendChild(ul);
+  }
 }
 
 // ---------- Reattach if a job is already running ----------
@@ -217,7 +248,12 @@ function startListeningForProgress() {
       // SW also opens the result tab.
       setTimeout(() => window.close(), 700);
     } else if (msg.type === 'error') {
-      ui.errorMsg.textContent = msg.message || 'unknown error';
+      let text = msg.message || 'unknown error';
+      // Carry the run's warnings into the error view — they usually hold the
+      // per-video reasons behind a summary error.
+      const ws = [...ui.warnings.querySelectorAll('li')].map(li => li.textContent);
+      if (ws.length) text += `\n\nAlong the way:\n${ws.map(w => `• ${w}`).join('\n')}`;
+      ui.errorMsg.textContent = text;
       show('error');
     }
   });

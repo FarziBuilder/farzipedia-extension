@@ -529,12 +529,100 @@ async function fetchTranscriptFromDom(tabId) {
 }
 
 // ============================================================================
-//   Transcript orchestrator — three layers
+//   Transcript layer 0: the player's own caption machinery (pot-aware)
 // ============================================================================
 
-/** Try layer 1 (timedtext), 2 (InnerTube), 3 (DOM scrape) — first success wins. */
+/**
+ * YouTube's /api/timedtext now demands a proof-of-origin ("pot") token that
+ * only the page's own player can mint — raw caption baseUrls come back empty
+ * or 5xx without it. So: quietly load the player's captions module, let the
+ * player fire its own timedtext request, steal that URL (pot included),
+ * refetch it as json3, and parse the events. The captions module is unloaded
+ * afterwards so no subtitles burn into the screenshots.
+ */
+async function fetchTranscriptViaPlayer(tabId) {
+  const result = await execInPage(tabId, async () => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const player = document.querySelector('#movie_player');
+    if (!player || typeof player.loadModule !== 'function') {
+      return { ok: false, error: 'No #movie_player with a loadModule API.' };
+    }
+    const countTimedtext = () => performance.getEntriesByType('resource')
+      .filter(e => e.name.includes('/api/timedtext')).length;
+    const before = countTimedtext();
+    let loaded = false;
+    try {
+      player.loadModule('captions');
+      loaded = true;
+      await sleep(250);
+      const tracklist = player.getOption('captions', 'tracklist') || [];
+      if (!tracklist.length) return { ok: false, error: 'Player captions module lists no tracks.' };
+      const score = (t) => (t.languageCode === 'en' ? 100 : 0) + (t.kind !== 'asr' ? 30 : 0);
+      const track = [...tracklist].sort((a, b) => score(b) - score(a))[0];
+      player.setOption('captions', 'track', track);
+
+      // Wait for the player's own timedtext request to show up
+      let url = null;
+      const t0 = Date.now();
+      while (Date.now() - t0 < 8000) {
+        const entries = performance.getEntriesByType('resource')
+          .filter(e => e.name.includes('/api/timedtext'));
+        if (entries.length > before) { url = entries[entries.length - 1].name; break; }
+        await sleep(250);
+      }
+      if (!url) return { ok: false, error: 'Player never fetched timedtext (captions module stayed idle).' };
+
+      let fetchUrl = /[?&]fmt=/.test(url)
+        ? url.replace(/([?&])fmt=[^&]*/, '$1fmt=json3')
+        : url + (url.includes('?') ? '&' : '?') + 'fmt=json3';
+      if (track.languageCode && track.languageCode !== 'en' && !/[?&]tlang=/.test(fetchUrl)) {
+        fetchUrl += '&tlang=en';
+      }
+      const r = await fetch(fetchUrl, { credentials: 'include' });
+      if (!r.ok) return { ok: false, error: `timedtext(pot) HTTP ${r.status}` };
+      const text = await r.text();
+      if (!text.trim()) return { ok: false, error: 'timedtext(pot) returned an empty body.' };
+      let events;
+      try { events = JSON.parse(text).events || []; }
+      catch { return { ok: false, error: 'timedtext(pot) response was not json3.' }; }
+      const snippets = [];
+      for (const ev of events) {
+        if (!ev.segs) continue;
+        const t = ev.segs.map(s => s.utf8 || '').join('').replace(/\s+/g, ' ').trim();
+        if (!t) continue;
+        snippets.push({ start: (ev.tStartMs || 0) / 1000, duration: (ev.dDurationMs || 0) / 1000, text: t });
+      }
+      if (!snippets.length) return { ok: false, error: 'timedtext(pot) parsed to 0 snippets.' };
+      return { ok: true, snippets };
+    } catch (e) {
+      return { ok: false, error: 'player-captions threw: ' + (e?.message || String(e)) };
+    } finally {
+      if (loaded) { try { player.unloadModule('captions'); } catch {} }
+    }
+  });
+  if (!result) throw new Error('player-captions returned no result (injection refused?).');
+  if (!result.ok) throw new Error(result.error);
+  return result.snippets;
+}
+
+// ============================================================================
+//   Transcript orchestrator — four layers
+// ============================================================================
+
+/** Try layer 0 (player pot fetch), 1 (timedtext), 2 (InnerTube), 3 (DOM scrape) — first success wins. */
 async function fetchTranscript(tabId, playerData) {
   const errors = [];
+
+  // ---------- Layer 0: the player's own caption fetch (carries the pot) ----------
+  try {
+    const snippets = await fetchTranscriptViaPlayer(tabId);
+    if (Array.isArray(snippets) && snippets.length) {
+      return { snippets, source: 'player-pot' };
+    }
+    errors.push('player: empty result');
+  } catch (e) {
+    errors.push('player: ' + (e?.message || e));
+  }
 
   // ---------- Layer 1: timedtext baseUrl from caption tracks ----------
   try {
@@ -578,7 +666,7 @@ async function fetchTranscript(tabId, playerData) {
   }
 
   throw new Error(
-    `All three transcript methods failed: ${errors.join(' | ')}. ` +
+    `All four transcript methods failed: ${errors.join(' | ')}. ` +
     `Try refreshing the YouTube tab (Ctrl+R), then retry.`
   );
 }
@@ -586,6 +674,12 @@ async function fetchTranscript(tabId, playerData) {
 /** Pre-flight: video element exists, ready to play, no ad showing, sane bounds. */
 async function preflight(tabId) {
   return execInPage(tabId, () => {
+    // Screenshots come from the visible tab, and requestAnimationFrame is
+    // paused in hidden tabs — a backgrounded tab can only produce timeouts.
+    // Fail fast with the real reason instead.
+    if (document.visibilityState !== 'visible') {
+      return { ok: false, reason: 'The YouTube tab is hidden — switch back to it and keep it on screen while the codex renders.' };
+    }
     const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
     if (!v) return { ok: false, reason: 'No <video> element on the page.' };
 
@@ -789,6 +883,23 @@ async function clearState() {
   await chrome.storage.local.remove('__farzi_running');
 }
 
+/**
+ * Persist a post-mortem of the run BEFORE clearState wipes the live state,
+ * so the popup can show what actually happened after a failed run — the
+ * per-video warnings are otherwise unrecoverable once the popup closes.
+ */
+async function saveLastRun(record) {
+  try {
+    await chrome.storage.local.set({
+      __farzi_lastrun: {
+        finishedAt: Date.now(),
+        warnings: (_state?.warnings || []).slice(-30),
+        ...record,
+      },
+    });
+  } catch {}
+}
+
 // ============================================================================
 //   Heartbeat — keep service worker alive during long jobs
 // ============================================================================
@@ -904,6 +1015,7 @@ async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = 
     if (!pre || !pre.ok) throw new Error(pre?.reason || 'Pre-flight check returned no result.');
 
     const frames = [];
+    let consecutiveSkips = 0;
     for (let i = 0; i < timestamps.length; i++) {
       const t = timestamps[i];
       const m = Math.floor(t / 60), s = Math.floor(t % 60).toString().padStart(2, '0');
@@ -960,8 +1072,16 @@ async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = 
 
       if (captured) {
         frames.push({ timestamp: t, dataB64: captured.dataB64 });
+        consecutiveSkips = 0;
       } else {
         await warn(`Skipped frame at ${m}:${s} — ${lastErr || 'unknown'}`);
+        consecutiveSkips++;
+        // Nothing has worked yet and five frames in a row just failed the
+        // same way — this video isn't capturable right now. Bail with the
+        // real reason instead of grinding through every remaining timestamp.
+        if (consecutiveSkips >= 5 && frames.length === 0) {
+          throw new Error(`Capture is failing repeatedly — ${lastErr || 'unknown reason'}`);
+        }
       }
     }
 
@@ -1054,6 +1174,7 @@ async function runJob(tabId) {
     const res = await processVideo(tabId, windowId, { apiKey, update, warn });
 
     await update('done', 1);
+    await saveLastRun({ ok: true, kind: 'video', published: res.publicUrl ? 1 : 0, total: 1 });
     broadcast({ type: 'done', jobId: res.jobId });
     // Send the reader to the folio's public farzi.me page; the local result
     // page is only the fallback for when publishing failed.
@@ -1067,6 +1188,7 @@ async function runJob(tabId) {
     if (e?._original) console.error('  original error:', e._original);
     try { await restoreUi(tabId); } catch {}
     const stepHint = e?._stepName ? ` (during "${e._stepName}")` : '';
+    await saveLastRun({ ok: false, kind: 'video', error: friendlyError(e) + stepHint });
     broadcast({ type: 'error', message: friendlyError(e) + stepHint });
   } finally {
     await clearState();
@@ -1179,7 +1301,7 @@ async function runPlaylistJob(tabId, playlistUrl) {
     const apiKey = await phase('api-key', () => getApiKey());
 
     const { ids, title } = await phase('playlist', () => fetchPlaylistVideos(listId));
-    if (!ids.length) throw new Error('No videos found in that playlist — is it public?');
+    if (!ids.length) throw new Error('No videos found in that playlist — it may be private, empty, or deleted (YouTube serves a normal-looking page for dead playlists).');
     const videos = ids.slice(0, PLAYLIST_MAX_VIDEOS);
     if (ids.length > videos.length) {
       await warn(`Playlist has ${ids.length} videos — processing the first ${videos.length}.`);
@@ -1191,6 +1313,7 @@ async function runPlaylistJob(tabId, playlistUrl) {
     try { await chrome.tabs.update(tabId, { muted: true }); muted = true; } catch {}
 
     const published = [];
+    const failures = [];
     for (let i = 0; i < videos.length; i++) {
       const vid = videos[i];
       const base = i / videos.length;
@@ -1199,6 +1322,15 @@ async function runPlaylistJob(tabId, playlistUrl) {
         update(`[video ${i + 1}/${videos.length}] ${message}`, base + span * Math.min(0.99, frac || 0));
       try {
         await scopedUpdate('loading video page', 0);
+        // Screenshots need the tab visible: bring it back to the front in
+        // case the user wandered off to another tab, and un-minimize the
+        // window if needed. (Without this, every capture times out.)
+        try { await chrome.tabs.update(tabId, { active: true }); } catch {}
+        try {
+          const t = await chrome.tabs.get(tabId);
+          const win = await chrome.windows.get(t.windowId);
+          if (win.state === 'minimized') await chrome.windows.update(win.id, { state: 'normal' });
+        } catch {}
         await chrome.tabs.update(tabId, { url: `https://www.youtube.com/watch?v=${vid}` });
         await waitForWatchPage(tabId, vid);
         await sleep(1500); // let the player settle
@@ -1217,24 +1349,41 @@ async function runPlaylistJob(tabId, playlistUrl) {
           await warn(`Stopped at video ${i + 1}/${videos.length} — the YouTube tab was closed.`);
           break;
         }
-        console.warn(`[FarziPedia] playlist video ${vid} failed:`, e?.message || e);
-        await warn(`Video ${i + 1}/${videos.length} failed — ${friendlyError(e).slice(0, 140)}`);
+        const reason = friendlyError(e);
+        failures.push(reason);
+        // console.error (not warn) so chrome://extensions "Errors" keeps it.
+        console.error(`[FarziPedia] playlist video ${i + 1}/${videos.length} (${vid}) failed:`, e?.message || e);
+        await warn(`Video ${i + 1}/${videos.length} failed — ${reason.slice(0, 140)}`);
         try { await restoreUi(tabId); } catch {}
+
+        // A bad/broke API key fails every video identically — and only after
+        // each one has burned minutes on captures. Stop the whole run now.
+        if (/401|rejected your key|out of credit|spend limit|no claude api key/i.test(reason)) {
+          throw new Error(`Stopping the playlist — this will fail for every video: ${reason}`);
+        }
+        // Three failures before any success = something systematic. Abort
+        // with the actual reasons instead of grinding through the rest.
+        if (!published.length && failures.length >= 3) {
+          throw new Error(`The first ${failures.length} videos all failed — stopping. First failure: ${failures[0]}`);
+        }
       }
     }
 
     if (!published.length) {
-      throw new Error('Every video in the playlist failed — see the warnings above.');
+      const patterns = [...new Set(failures.map(f => f.slice(0, 100)))].slice(0, 2);
+      throw new Error(`Every video in the playlist failed. ${patterns.length ? `Reason(s): ${patterns.join(' | ')}` : 'No diagnostics were recorded.'}`);
     }
     const uploaded = published.filter(r => r.publicUrl);
     if (uploaded.length < published.length) {
       await warn(`${published.length - uploaded.length} folio(s) were generated but couldn't be published — they're saved locally in the extension.`);
     }
     await update(`done — ${uploaded.length}/${videos.length} folios bound into the "${repoName}" tome`, 1);
+    await saveLastRun({ ok: true, kind: 'playlist', published: uploaded.length, total: videos.length });
     broadcast({ type: 'done', jobId: published[published.length - 1].jobId });
     chrome.tabs.create({ url: `${await resolveFarziBase()}/` });
   } catch (e) {
     console.error('[FarziPedia] playlist job failed:', e?.message || e);
+    await saveLastRun({ ok: false, kind: 'playlist', error: friendlyError(e) });
     broadcast({ type: 'error', message: friendlyError(e) });
   } finally {
     if (muted) { try { await chrome.tabs.update(tabId, { muted: false }); } catch {} }
