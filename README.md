@@ -15,8 +15,8 @@
 Open a YouTube video → click the FarziPedia icon → click **Render the Codex**.
 
 The extension:
-1. Reads the transcript directly from YouTube's player data (three fallback methods, one of them always works)
-2. Seeks the video to ~30–40 cue-driven timestamps and screenshots each
+1. Reads the transcript through YouTube's own player (with three fallbacks)
+2. Seeks the video to 20–60 cue-driven timestamps and screenshots each
 3. Sends the transcript + frames to Claude (your own Anthropic API key)
 4. Returns a magazine-style blog post — illuminated initials, parchment background, Cinzel Roman caps
 5. Saves it as Markdown or PDF on demand
@@ -26,6 +26,10 @@ No proxies. No yt-dlp. No server. No anti-bot dance — your browser, your IP, y
 ---
 
 ## Install (~3 minutes)
+
+**Easiest:** install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/dbgbnmbjkgaogoemdaldnmgidkaialll), then skip to step 3. Store installs update themselves.
+
+To run the code from this repo instead (for development):
 
 ### 1. Download the extension folder
 
@@ -55,17 +59,17 @@ The extension calls Claude directly from your browser, so it needs your own key.
 
 ### 4. Paste the key in the popup
 
-Click the FarziPedia icon → expand "Use my own API key" → paste your `sk-ant-…` → **Save**.
+Click the FarziPedia icon → expand "Your Claude API key" → paste your `sk-ant-…` → **Save**.
 
 The popup status will switch to **✓ using your saved key** and the **Render the Codex** button will enable.
 
-That's it. Open any YouTube video with captions and try it.
+That's it. Open any YouTube video with captions, press play, and try it.
 
 ---
 
 ## What each video costs you
 
-Roughly **$0.05–$0.20** in Claude vision tokens, depending on length and frame count. A 15-min video with 30 frames is ~$0.10. Your $5 spend limit covers ~50 videos comfortably.
+Roughly **$0.50–$1.50** with Claude Opus 4.8, depending on length: frames are most of the input (20 for a short video, up to 60 for a long one, ~1,900 tokens each at 1600px), plus the transcript and the written post. A $10 spend limit covers about 10 videos. These are estimates; your Anthropic console shows the real cost per request.
 
 ---
 
@@ -76,16 +80,16 @@ You click "Render the Codex"
        ↓
 Service worker reads YouTube's player data via chrome.scripting (MAIN world)
        ↓
-Three transcript layers (timedtext → InnerTube → DOM scrape) — first one wins
+Four transcript layers (player's own caption request → timedtext → InnerTube → DOM scrape) — first one wins
        ↓
 For each planned timestamp:
-   ├─ seek video, hide overlays
-   ├─ chrome.tabs.captureVisibleTab → crop to video bounds
+   ├─ seek video, hide YouTube's UI (controls, subtitles, end cards, header)
+   ├─ chrome.tabs.captureVisibleTab → crop to video bounds → shrink to ≤1600px
    └─ verify frame isn't black, retry if it is
        ↓
-Send transcript + frames to api.anthropic.com (claude-sonnet-4-5)
+Send transcript + frames to api.anthropic.com (claude-opus-4-8)
        ↓
-Open result tab with the rendered blog
+Publish the post to farzipedia.com (saved locally too) and open it
 ```
 
 Sequential capture (not parallel) takes ~1–2s per frame. A 15-minute video → ~30 frames → ~40s of capture + ~30s of Claude generation = **~1 minute total**.
@@ -97,6 +101,7 @@ Sequential capture (not parallel) takes ~1–2s per frame. A 15-minute video →
 ```
 farzipedia-extension/
 ├── manifest.json
+├── scripts/publish.mjs         # Package + push to the Chrome Web Store
 ├── icons/                     # 16/48/128 PNG (open book + red bookmark)
 ├── popup/                     # API-key entry, "Render" button, live progress
 ├── background/service-worker.js  # The whole pipeline
@@ -114,7 +119,9 @@ farzipedia-extension/
 
 | Symptom | Fix |
 |---|---|
-| "**No API key configured**" in popup | Paste your `sk-ant-…` in the popup's "Use my own API key" section. |
+| "**No API key configured**" in popup | Paste your `sk-ant-…` in the popup's "Your Claude API key" section. |
+| "**Press play on the video**" | YouTube only loads captions once a video has started. Play it for a moment (skip any ad), then click Render again. |
+| "**Start a playlist from a YouTube tab**" | The playlist plays in the current tab, so open any YouTube page first. |
 | "**Couldn't read YouTube's player data**" | Refresh the YouTube tab (Ctrl+R), then reopen the popup. |
 | "**No captions enabled**" | The video doesn't have a caption track. Try a different video. |
 | "**An ad is currently playing**" | Skip the ad in the player, then click Render again. |
@@ -129,7 +136,9 @@ For deeper debugging, open `chrome://extensions/` → "Inspect views: service wo
 
 ## Updating
 
-Since this isn't on the Chrome Web Store, there's no auto-update.
+Chrome Web Store installs update automatically, usually within a few hours of a new version going live.
+
+For a "Load unpacked" copy:
 
 ```powershell
 cd path/to/farzipedia-extension
@@ -137,6 +146,37 @@ git pull
 ```
 
 Then `chrome://extensions/` → click the ⟳ reload icon on the FarziPedia card.
+
+Posts that didn't reach farzipedia.com are kept in the browser: open `chrome-extension://<extension id>/result/result.html` to list them.
+
+---
+
+## Publishing to the Chrome Web Store (maintainers)
+
+`scripts/publish.mjs` packages the extension and pushes it through the Chrome Web Store API, so you never have to upload a zip by hand. It needs Node 16+ and nothing else.
+
+**One-time setup** (about 10 minutes, all in your own accounts):
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), pick or create a project, then enable the **Chrome Web Store API**.
+2. **IAM & Admin → Service accounts → Create service account** (no roles needed). Open it → **Keys → Add key → JSON**. Store the downloaded file **outside this repo**, for example in `~/.config/farzipedia/`.
+3. In the [Developer Dashboard](https://chrome.google.com/webstore/devconsole), open **Account** and add the service account's email (one per publisher). Copy your **publisher ID** from the publisher settings.
+4. Create `~/.config/farzipedia/cws.json`:
+
+   ```json
+   { "publisherId": "YOUR_PUBLISHER_ID", "serviceAccountKeyFile": "/Users/you/.config/farzipedia/cws-key.json" }
+   ```
+
+**Each release:**
+
+1. Bump `"version"` in `manifest.json`, commit, and push. The script refuses to ship uncommitted or unpushed code, so the store always matches GitHub.
+2. Run:
+
+   ```bash
+   node scripts/publish.mjs status    # what the store has now (read-only)
+   node scripts/publish.mjs publish   # zip, upload, submit for review
+   ```
+
+`check` only builds `dist/farzipedia-<version>.zip`. `upload` stops at a draft without submitting. `publish --staged` holds the approved version until you release it from the dashboard. The script also refuses to ship a build with a key in `lib/config.js`.
 
 ---
 
@@ -162,6 +202,7 @@ git update-index --skip-worktree lib/config.js
 
 - **YouTube tab must stay on screen during capture.** `captureVisibleTab` only sees the active tab. Switch away mid-capture and a few frames will fail (you'll get warnings, not a hard fail).
 - **Captions required.** Videos without manual or auto-generated captions can't be processed.
+- **The video must have started playing.** YouTube only loads captions after playback begins.
 - **Livestreams unsupported.** The pipeline checks for `videoDetails.isLive` and bails early.
 - **API key sits in your browser's `chrome.storage.sync`.** Set a spend limit. Don't share devices.
 
@@ -171,7 +212,7 @@ git update-index --skip-worktree lib/config.js
 
 - **Manifest V3** Chrome extension
 - **`chrome.scripting.executeScript({ world: 'MAIN' })`** for all YouTube page reads
-- **Claude Sonnet 4.5** with `anthropic-dangerous-direct-browser-access` for browser-direct API calls
+- **Claude Opus 4.8** (adaptive thinking, schema-enforced JSON) with `anthropic-dangerous-direct-browser-access` for browser-direct API calls
 - **OffscreenCanvas** for in-SW frame cropping + black-frame detection
 - **Cinzel + Cormorant Garamond + IM Fell English + Italianno** for the Renaissance typography
 

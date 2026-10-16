@@ -80,23 +80,28 @@ async function readPlayerData(tabId) {
   );
 }
 
-/** Strip any existing `fmt=` from a baseUrl and append our own. */
-function withFmt(baseUrl, fmt) {
-  const stripped = baseUrl.replace(/([?&])fmt=[^&]*&?/g, (m, p1) => p1 === '?' ? '?' : '').replace(/[?&]$/, '');
-  const sep = stripped.includes('?') ? '&' : '?';
-  return fmt ? `${stripped}${sep}fmt=${fmt}` : stripped;
+/** Set (or, for null/'', delete) query params on a URL. */
+function withQuery(baseUrl, params) {
+  const u = new URL(baseUrl, 'https://www.youtube.com');
+  for (const [k, v] of Object.entries(params)) {
+    if (v == null || v === '') u.searchParams.delete(k);
+    else u.searchParams.set(k, v);
+  }
+  return u.toString();
 }
 
-/** Decode the small set of HTML entities YouTube uses in caption XML. */
+/** Decode the HTML entities YouTube uses in caption XML and page titles.
+ * One pass, so "&amp;lt;" stays "&lt;" instead of being decoded twice. */
 function decodeHtmlEntities(s) {
-  return (s || '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  return (s || '').replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, ent) => {
+    if (ent[0] === '#') {
+      const hex = ent[1] === 'x' || ent[1] === 'X';
+      const cp = parseInt(ent.slice(hex ? 2 : 1), hex ? 16 : 10);
+      return cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+    }
+    return named[ent.toLowerCase()] ?? m;
+  });
 }
 
 /** Parse YouTube's classic XML caption format. */
@@ -150,7 +155,7 @@ async function tryTrack(tabId, track) {
   const useTlang = track.languageCode && track.languageCode !== 'en';
 
   for (const { fmt, as } of attempts) {
-    const url = (useTlang ? withFmt(baseUrl, fmt) + '&tlang=en' : withFmt(baseUrl, fmt));
+    const url = withQuery(baseUrl, { fmt, ...(useTlang ? { tlang: 'en' } : {}) });
     try {
       const text = await execInPage(tabId, async (u) => {
         const r = await fetch(u, { credentials: 'include' });
@@ -354,9 +359,11 @@ async function fetchTranscriptInnerTube(tabId, playerData) {
       credentials: 'include',
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error(`InnerTube HTTP ${r.status}`);
+    // Return the failure: a page-side throw reaches us as a bare null.
+    if (!r.ok) return { __error: `InnerTube HTTP ${r.status}` };
     return r.json();
   }, [url, { context: cfg.ctx, params }]);
+  if (data?.__error) throw new Error(data.__error);
 
   const snippets = parseInnerTubeTranscript(data);
   if (!snippets.length) {
@@ -537,8 +544,9 @@ async function fetchTranscriptFromDom(tabId) {
  * only the page's own player can mint — raw caption baseUrls come back empty
  * or 5xx without it. So: quietly load the player's captions module, let the
  * player fire its own timedtext request, steal that URL (pot included),
- * refetch it as json3, and parse the events. The captions module is unloaded
- * afterwards so no subtitles burn into the screenshots.
+ * refetch it as json3, and parse the events. Afterwards the captions module
+ * is put back the way the viewer had it (the capture stylesheet hides the
+ * caption window, so no subtitles burn into the screenshots).
  */
 async function fetchTranscriptViaPlayer(tabId) {
   const result = await execInPage(tabId, async () => {
@@ -547,57 +555,93 @@ async function fetchTranscriptViaPlayer(tabId) {
     if (!player || typeof player.loadModule !== 'function') {
       return { ok: false, error: 'No #movie_player with a loadModule API.' };
     }
-    const countTimedtext = () => performance.getEntriesByType('resource')
-      .filter(e => e.name.includes('/api/timedtext')).length;
-    const before = countTimedtext();
-    let loaded = false;
+    const vid = new URLSearchParams(location.search).get('v') || '';
+    const vidRe = new RegExp(`[?&]v=${vid}(?:&|$)`);
+    const isOurs = (name) => name.includes('/api/timedtext') && (!vid || vidRe.test(name));
+    // Requests the player made before we started (the viewer had CC on)
+    // carry a valid pot too. Picking the track that's already showing
+    // doesn't refetch, so keep these as a fallback.
+    const earlier = performance.getEntriesByType('resource').map(e => e.name).filter(isOurs);
+    // Watch for new requests with an observer: getEntriesByType() stops
+    // seeing new entries once the page's 250-entry timing buffer is full,
+    // which a long-lived YouTube tab reaches easily.
+    const fresh = [];
+    let observer = null;
+    try {
+      observer = new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) if (isOurs(e.name)) fresh.push(e.name);
+      });
+      observer.observe({ type: 'resource' });
+    } catch {}
+
+    // Leave the viewer's own subtitles the way we found them.
+    let trackBefore = null;
+    try { trackBefore = player.getOption('captions', 'track'); } catch {}
+    const ccWasOn = document.querySelector('.ytp-subtitles-button')?.getAttribute('aria-pressed') === 'true'
+      || !!trackBefore?.languageCode;
     try {
       player.loadModule('captions');
-      loaded = true;
-      await sleep(250);
-      const tracklist = player.getOption('captions', 'tracklist') || [];
-      if (!tracklist.length) return { ok: false, error: 'Player captions module lists no tracks.' };
+      let tracklist = [];
+      for (let i = 0; i < 12 && !tracklist.length; i++) {
+        try { tracklist = player.getOption('captions', 'tracklist', { includeAsr: true }) || []; } catch {}
+        if (!tracklist.length) tracklist = player.getOption('captions', 'tracklist') || [];
+        if (!tracklist.length) await sleep(250);
+      }
+      // An empty tracklist doesn't mean "no captions": the player can still
+      // fetch its default track, so wait for a request either way.
       const score = (t) => (t.languageCode === 'en' ? 100 : 0) + (t.kind !== 'asr' ? 30 : 0);
-      const track = [...tracklist].sort((a, b) => score(b) - score(a))[0];
-      player.setOption('captions', 'track', track);
+      const track = tracklist.length ? [...tracklist].sort((a, b) => score(b) - score(a))[0] : null;
+      if (track) player.setOption('captions', 'track', track);
 
-      // Wait for the player's own timedtext request to show up
-      let url = null;
+      // Wait for the player's own timedtext request; if none comes, fall
+      // back to ones it made before we started.
       const t0 = Date.now();
-      while (Date.now() - t0 < 8000) {
-        const entries = performance.getEntriesByType('resource')
-          .filter(e => e.name.includes('/api/timedtext'));
-        if (entries.length > before) { url = entries[entries.length - 1].name; break; }
+      while (Date.now() - t0 < 8000 && !fresh.length) {
+        if (earlier.length && Date.now() - t0 > 2000) break;
         await sleep(250);
       }
-      if (!url) return { ok: false, error: 'Player never fetched timedtext (captions module stayed idle).' };
+      // Newest first. A request made around an ad can come back empty, so
+      // try a few before giving up.
+      const urls = [...new Set([...fresh].reverse().concat([...earlier].reverse()))].slice(0, 4);
+      if (!urls.length) {
+        return { ok: false, error: track
+          ? 'Player never fetched timedtext (captions module stayed idle).'
+          : 'Player captions module lists no tracks.' };
+      }
 
-      let fetchUrl = /[?&]fmt=/.test(url)
-        ? url.replace(/([?&])fmt=[^&]*/, '$1fmt=json3')
-        : url + (url.includes('?') ? '&' : '?') + 'fmt=json3';
-      if (track.languageCode && track.languageCode !== 'en' && !/[?&]tlang=/.test(fetchUrl)) {
-        fetchUrl += '&tlang=en';
+      let lastError = '';
+      for (const url of urls) {
+        const u = new URL(url, location.href);
+        u.searchParams.set('fmt', 'json3');
+        const lang = u.searchParams.get('lang') || track?.languageCode || '';
+        if (lang && !/^en\b/i.test(lang)) u.searchParams.set('tlang', 'en');
+        else u.searchParams.delete('tlang');
+        const r = await fetch(u.toString(), { credentials: 'include' });
+        if (!r.ok) { lastError = `timedtext(pot) HTTP ${r.status}`; continue; }
+        const text = await r.text();
+        if (!text.trim()) { lastError = 'timedtext(pot) returned an empty body.'; continue; }
+        let events;
+        try { events = JSON.parse(text).events || []; }
+        catch { lastError = 'timedtext(pot) response was not json3.'; continue; }
+        const snippets = [];
+        for (const ev of events) {
+          if (!ev.segs) continue;
+          const t = ev.segs.map(s => s.utf8 || '').join('').replace(/\s+/g, ' ').trim();
+          if (!t) continue;
+          snippets.push({ start: (ev.tStartMs || 0) / 1000, duration: (ev.dDurationMs || 0) / 1000, text: t });
+        }
+        if (snippets.length) return { ok: true, snippets };
+        lastError = 'timedtext(pot) parsed to 0 snippets.';
       }
-      const r = await fetch(fetchUrl, { credentials: 'include' });
-      if (!r.ok) return { ok: false, error: `timedtext(pot) HTTP ${r.status}` };
-      const text = await r.text();
-      if (!text.trim()) return { ok: false, error: 'timedtext(pot) returned an empty body.' };
-      let events;
-      try { events = JSON.parse(text).events || []; }
-      catch { return { ok: false, error: 'timedtext(pot) response was not json3.' }; }
-      const snippets = [];
-      for (const ev of events) {
-        if (!ev.segs) continue;
-        const t = ev.segs.map(s => s.utf8 || '').join('').replace(/\s+/g, ' ').trim();
-        if (!t) continue;
-        snippets.push({ start: (ev.tStartMs || 0) / 1000, duration: (ev.dDurationMs || 0) / 1000, text: t });
-      }
-      if (!snippets.length) return { ok: false, error: 'timedtext(pot) parsed to 0 snippets.' };
-      return { ok: true, snippets };
+      return { ok: false, error: `${lastError} (tried ${urls.length} request${urls.length > 1 ? 's' : ''})` };
     } catch (e) {
       return { ok: false, error: 'player-captions threw: ' + (e?.message || String(e)) };
     } finally {
-      if (loaded) { try { player.unloadModule('captions'); } catch {} }
+      try { observer?.disconnect(); } catch {}
+      try {
+        if (!ccWasOn) player.unloadModule('captions');
+        else if (trackBefore?.languageCode) player.setOption('captions', 'track', trackBefore);
+      } catch {}
     }
   });
   if (!result) throw new Error('player-captions returned no result (injection refused?).');
@@ -673,7 +717,7 @@ async function fetchTranscript(tabId, playerData) {
 
 /** Pre-flight: video element exists, ready to play, no ad showing, sane bounds. */
 async function preflight(tabId) {
-  return execInPage(tabId, () => {
+  return execInPage(tabId, async () => {
     // Screenshots come from the visible tab, and requestAnimationFrame is
     // paused in hidden tabs — a backgrounded tab can only produce timeouts.
     // Fail fast with the real reason instead.
@@ -691,11 +735,24 @@ async function preflight(tabId) {
       document.querySelector('.ytp-ad-text');
     if (adShowing) return { ok: false, reason: 'An ad is currently playing. Skip the ad in the player, then click Render again.' };
 
+    // YouTube's caption + pot machinery only wakes up once playback has
+    // started (-1 = unstarted, 5 = cued), and frames need decoded video.
+    const state = document.querySelector('#movie_player')?.getPlayerState?.();
+    if (state === -1 || state === 5) return { ok: false, reason: 'Press play on the video for a moment (skip any ad), then click Render again.' };
+
     // readyState >= 2 (HAVE_CURRENT_DATA)
     if (v.readyState < 2) return { ok: false, reason: 'Video isn\'t ready yet — let it buffer for a few seconds and retry.' };
 
-    const r = v.getBoundingClientRect();
+    let r = v.getBoundingClientRect();
     if (r.width < 100 || r.height < 60) return { ok: false, reason: 'Video player is hidden or too small. Make sure the YouTube tab is on screen.' };
+    // Frames are cropped out of a screenshot of the viewport, so the whole
+    // player has to be on screen — scroll it back if the viewer moved away.
+    if (r.top < 0 || r.left < 0 || r.bottom > window.innerHeight || r.right > window.innerWidth) {
+      try { v.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); }
+      catch { v.scrollIntoView({ block: 'center', inline: 'nearest' }); }
+      await new Promise(res => setTimeout(res, 300)); // let any smooth scroll settle
+      r = v.getBoundingClientRect();
+    }
     if (r.bottom <= 0 || r.top >= window.innerHeight) return { ok: false, reason: 'Video element is scrolled off-screen. Scroll it into view and retry.' };
 
     return { ok: true, duration: v.duration };
@@ -704,16 +761,111 @@ async function preflight(tabId) {
 
 /** Seek video to `t` seconds, hide overlays, return bounds for cropping. */
 async function seekAndPrepare(tabId, t) {
-  return execInPage(tabId, async (timestamp) => {
+  // chrome.scripting turns a page-side throw or rejection into a bare null,
+  // so the page code reports failures as { error } instead.
+  const res = await execInPage(tabId, async (timestamp) => {
     const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
-    if (!v) throw new Error('Video element disappeared.');
+    if (!v) return { error: 'Video element disappeared.' };
 
-    // Hide overlays
+    // Inject a stylesheet that hides every known piece of YouTube player
+    // chrome with !important. This beats:
+    //   - YouTube's own JS toggling classes (e.g. removing `.ytp-autohide`
+    //     when the video is paused, which re-shows the top title bar)
+    //   - inline-style overrides set by YouTube on chrome elements
+    // Idempotent: only adds the <style> once per tab.
+    const STYLE_ID = 'fp-hide-chrome';
+    if (!document.getElementById(STYLE_ID)) {
+      const s = document.createElement('style');
+      s.id = STYLE_ID;
+      s.textContent = `
+        /* === YouTube site-level chrome (ytd-* custom elements) ===
+           These are position:fixed at the top of the viewport and visually
+           overlap the top of the <video> element, so they leak into a
+           captureVisibleTab crop of the video bounds. Use display:none
+           so they're removed from the paint tree entirely. */
+        ytd-masthead,
+        #masthead-container,
+        #masthead,
+        tp-yt-app-header,
+        tp-yt-iron-overlay-backdrop,
+        ytd-popup-container,
+        ytd-mealbar-promo-renderer,
+        ytd-button-renderer.style-scope.ytd-masthead,
+        #consent-bump-v2-lightbox,
+        ytd-consent-bump-v2-lightbox,
+        ytd-engagement-panel-section-list-renderer[modern-panels] {
+          display: none !important;
+        }
+
+        /* === In-player chrome === Hidden via visibility so the player
+           keeps its layout (some code reads the player rect). */
+        .ytp-chrome-top,
+        .ytp-chrome-top-buttons,
+        .ytp-title,
+        .ytp-title-channel,
+        .ytp-title-text,
+        .ytp-title-link,
+        .ytp-watch-later-button,
+        .ytp-share-button,
+        .ytp-overflow-button,
+        .ytp-chrome-bottom,
+        .ytp-gradient-top,
+        .ytp-gradient-bottom,
+        .ytp-cc-window-container,
+        .ytp-caption-window-container,
+        .caption-window,
+        .ytp-pause-overlay,
+        .ytp-pause-overlay-container,
+        .ytp-spinner,
+        .ytp-watermark,
+        .ytp-tooltip,
+        .ytp-bezel,
+        .ytp-bezel-text-wrapper,
+        .ytp-popup,
+        .ytp-large-play-button,
+        .ytp-cards-button,
+        .ytp-cards-teaser,
+        .ytp-ce-element,
+        .ytp-ce-covering-image,
+        .ytp-endscreen-content,
+        .ytp-info-panel-preview,
+        .ytp-impression-link,
+        .ytp-show-cards-title,
+        .ytp-paid-content-overlay,
+        .ytp-fine-scrubbing-info-bar,
+        .ytp-iv-player-content,
+        .iv-click-target,
+        .iv-branding,
+        .annotation,
+        .ytp-suggested-action,
+        .ytp-suggested-action-badge {
+          visibility: hidden !important;
+          opacity: 0 !important;
+          pointer-events: none !important;
+        }
+        /* Force "autohide" so YouTube's own CSS path also hides the chrome,
+           and never paints a cursor over the captured area. */
+        .html5-video-player,
+        .html5-video-player * {
+          cursor: none !important;
+        }
+        .html5-video-player.ytp-autohide-active .ytp-chrome-top,
+        .html5-video-player.ytp-autohide-active .ytp-chrome-bottom {
+          display: none !important;
+        }
+      `;
+      (document.head || document.documentElement).appendChild(s);
+    }
+
+    // Belt-and-suspenders: also stamp inline visibility on the elements
+    // that exist right now, so we cover any stylesheets that might load
+    // late and out-specificity our injected one.
     const HIDE_SELECTORS = [
-      '.ytp-chrome-bottom', '.ytp-cc-window-container', '.ytp-gradient-bottom',
-      '.ytp-gradient-top', '.ytp-pause-overlay', '.ytp-chrome-top',
+      '.ytp-chrome-top', '.ytp-chrome-bottom', '.ytp-gradient-top',
+      '.ytp-gradient-bottom', '.ytp-cc-window-container', '.ytp-caption-window-container', '.ytp-pause-overlay',
       '.ytp-spinner', '.iv-branding', '.ytp-watermark', '.ytp-tooltip',
-      '.ytp-bezel', '.ytp-popup',
+      '.ytp-bezel', '.ytp-popup', '.ytp-large-play-button',
+      '.ytp-ce-element', '.ytp-endscreen-content', '.ytp-cards-teaser',
     ];
     for (const sel of HIDE_SELECTORS) {
       for (const el of document.querySelectorAll(sel)) {
@@ -723,17 +875,25 @@ async function seekAndPrepare(tabId, t) {
         }
       }
     }
+
+    // Force the player into autohide state so YouTube's own UI agrees.
+    const player = document.querySelector('.html5-video-player');
+    if (player) {
+      player.classList.add('ytp-autohide', 'ytp-autohide-active');
+    }
+
     v.style.cursor = 'none';
     v.pause();
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const safeT = Math.min(Math.max(0.1, timestamp), v.duration - 0.5);
       const cleanup = () => {
         v.removeEventListener('seeked', onSeeked);
         v.removeEventListener('error', onError);
         clearTimeout(timer);
       };
-      const timer = setTimeout(() => { cleanup(); reject(new Error(`Seek to ${timestamp}s timed out.`)); }, 10_000);
+      const fail = (error) => { cleanup(); resolve({ error }); };
+      const timer = setTimeout(() => fail(`Seek to ${timestamp}s timed out.`), 10_000);
       const onSeeked = () => {
         cleanup();
         // Wait two animation frames for the actual frame to render
@@ -748,23 +908,34 @@ async function seekAndPrepare(tabId, t) {
           });
         }));
       };
-      const onError = () => { cleanup(); reject(new Error('Video errored during seek.')); };
+      const onError = () => fail('Video errored during seek.');
       v.addEventListener('seeked', onSeeked, { once: true });
       v.addEventListener('error', onError, { once: true });
       try { v.currentTime = safeT; }
-      catch (e) { cleanup(); reject(new Error('Seek call failed: ' + (e.message || e))); }
+      catch (e) { fail('Seek call failed: ' + (e.message || e)); }
     });
   }, [t]);
+  if (!res) throw new Error('Seek returned nothing — the YouTube page refused the script.');
+  if (res.error) throw new Error(res.error);
+  return res;
 }
 
 /** Restore overlay visibility after a job completes (or fails). */
 async function restoreUi(tabId) {
   await execInPage(tabId, () => {
+    // Remove the injected !important stylesheet
+    const s = document.getElementById('fp-hide-chrome');
+    if (s) s.remove();
+    // Restore per-element inline visibility
     for (const el of document.querySelectorAll('[data-fp-hidden]')) {
       const prev = el.dataset.fpHidden;
       el.style.visibility = (prev === '__empty__' ? '' : prev) || '';
       delete el.dataset.fpHidden;
     }
+    // Drop the force-autohide class so the user gets normal chrome back.
+    // YouTube re-adds .ytp-autohide itself when the cursor goes idle.
+    const player = document.querySelector('.html5-video-player');
+    if (player) player.classList.remove('ytp-autohide-active');
     const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
     if (v) v.style.cursor = '';
   }).catch(() => {});
@@ -799,33 +970,45 @@ function bytesToBase64(bytes) {
   return btoa(bin);
 }
 
+// Long-edge cap for frames. HiDPI screens otherwise produce 2000–3000px
+// crops, and the Claude API rejects images over 2000px in any request with
+// more than 20 images (and caps the whole request at 32 MB).
+const MAX_FRAME_EDGE = 1600;
+
 /** Crop the captured tab to the video bounds, return base64 JPEG. */
 async function cropToBounds(dataUrl, bounds) {
   const bitmap = await dataUrlToBitmap(dataUrl);
   const dpr = bounds.dpr || 1;
+  // Intersect the player with the captured viewport. Clamping only the
+  // origin would pull page content into the frame whenever the player
+  // sticks out past an edge.
   const sx = Math.max(0, Math.round(bounds.x * dpr));
   const sy = Math.max(0, Math.round(bounds.y * dpr));
-  const sw = Math.min(bitmap.width - sx, Math.round(bounds.w * dpr));
-  const sh = Math.min(bitmap.height - sy, Math.round(bounds.h * dpr));
+  const sw = Math.min(bitmap.width, Math.round((bounds.x + bounds.w) * dpr)) - sx;
+  const sh = Math.min(bitmap.height, Math.round((bounds.y + bounds.h) * dpr)) - sy;
 
   if (sw <= 0 || sh <= 0) {
     bitmap.close();
     throw new Error('Crop bounds are outside the captured image — keep the YouTube tab on screen.');
   }
 
-  const canvas = new OffscreenCanvas(sw, sh);
+  const scale = Math.min(1, MAX_FRAME_EDGE / Math.max(sw, sh));
+  const ow = Math.max(1, Math.round(sw * scale));
+  const oh = Math.max(1, Math.round(sh * scale));
+  const canvas = new OffscreenCanvas(ow, oh);
   const ctx = canvas.getContext('2d');
-  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+  ctx.imageSmoothingQuality = 'high'; // keep on-screen text legible when shrinking
+  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, ow, oh);
   bitmap.close();
 
   // Quick brightness sample — detect mostly-black frames (DRM, transitions)
-  const sampleW = Math.min(sw, 30), sampleH = Math.min(sh, 20);
-  const sample = ctx.getImageData(0, 0, sw, sh, { willReadFrequently: false });
+  const sampleW = Math.min(ow, 30), sampleH = Math.min(oh, 20);
+  const sample = ctx.getImageData(0, 0, ow, oh, { willReadFrequently: false });
   let totalBrightness = 0, samples = 0;
   // Sample on a grid
   for (let y = 0; y < sampleH; y++) {
     for (let x = 0; x < sampleW; x++) {
-      const px = ((Math.floor(sh * y / sampleH)) * sw + Math.floor(sw * x / sampleW)) * 4;
+      const px = ((Math.floor(oh * y / sampleH)) * ow + Math.floor(ow * x / sampleW)) * 4;
       totalBrightness += (sample.data[px] + sample.data[px + 1] + sample.data[px + 2]) / 3;
       samples++;
     }
@@ -837,8 +1020,8 @@ async function cropToBounds(dataUrl, bounds) {
   return {
     dataB64: bytesToBase64(new Uint8Array(buf)),
     avgBrightness,
-    width: sw,
-    height: sh,
+    width: ow,
+    height: oh,
   };
 }
 
@@ -864,9 +1047,7 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'progress') return;
   _ports.add(port);
   // Replay last known status to a freshly connected popup
-  chrome.storage.local.get('__farzi_running').then(({ __farzi_running }) => {
-    if (__farzi_running) port.postMessage({ type: 'replay', state: __farzi_running });
-  });
+  if (_state) port.postMessage({ type: 'replay', state: _state });
   port.onDisconnect.addListener(() => _ports.delete(port));
 });
 function broadcast(event) {
@@ -874,6 +1055,27 @@ function broadcast(event) {
 }
 
 let _state = null; // mirrored to chrome.storage.local at __farzi_running
+
+// A job only lives in this worker's memory, so a __farzi_running left in
+// storage when the worker starts is from a worker that died mid-run. Record
+// it as interrupted and clear it — otherwise the popup shows a frozen
+// progress bar forever.
+const _staleStateCleanup = (async () => {
+  try {
+    const { __farzi_running: ghost } = await chrome.storage.local.get('__farzi_running');
+    if (!ghost || _state) return;
+    await chrome.storage.local.set({
+      __farzi_lastrun: {
+        ok: false,
+        kind: ghost.playlist ? 'playlist' : 'video',
+        finishedAt: Date.now(),
+        warnings: (ghost.warnings || []).slice(-30),
+        error: `Interrupted at "${ghost.message || 'unknown step'}" — the extension restarted mid-run. Start it again.`,
+      },
+    });
+    await chrome.storage.local.remove('__farzi_running');
+  } catch {}
+})();
 async function setState(patch) {
   _state = { ..._state, ...patch };
   await chrome.storage.local.set({ __farzi_running: _state });
@@ -924,12 +1126,16 @@ function stopHeartbeat() {
 // ============================================================================
 
 async function trimOldJobs(keepCount = 5) {
-  const all = await chrome.storage.local.get(null);
-  const jobs = Object.entries(all).filter(([k]) => k.startsWith('job-'));
-  if (jobs.length <= keepCount) return;
-  jobs.sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
-  const toRemove = jobs.slice(keepCount).map(([k]) => k);
-  if (toRemove.length) await chrome.storage.local.remove(toRemove);
+  // Job keys are `job-<Date.now()>-<rand>`, so sort by key — loading every
+  // job's frames just to read `ts` would pull hundreds of MB after a playlist.
+  const keys = chrome.storage.local.getKeys
+    ? await chrome.storage.local.getKeys()
+    : Object.keys(await chrome.storage.local.get(null));
+  const jobKeys = keys.filter(k => k.startsWith('job-'));
+  if (jobKeys.length <= keepCount) return;
+  const created = (k) => parseInt(k.split('-')[1], 10) || 0;
+  jobKeys.sort((a, b) => created(b) - created(a));
+  await chrome.storage.local.remove(jobKeys.slice(keepCount));
 }
 
 // ============================================================================
@@ -986,6 +1192,12 @@ async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = 
     broadcast({ type: 'meta', meta });
 
     if (meta.duration < 30) throw new Error('Video is too short (under 30s) to be worth blogging.');
+
+    // Fail fast on a player we can't use (not started, ad, hidden tab)
+    // before the transcript fallbacks spend a minute failing for that reason.
+    await update('checking video player', 0.08);
+    const pre0 = await phase('preflight', () => preflight(tabId));
+    if (!pre0 || !pre0.ok) throw new Error(pre0?.reason || 'Pre-flight check returned no result.');
 
     // ---------- 3. Transcript ----------
     await update('fetching transcript', 0.10);
@@ -1118,17 +1330,17 @@ async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = 
     await chrome.storage.local.set({ [jobId]: { blog, frames: frameMap, ts: Date.now() } });
     await trimOldJobs(trimKeep);
 
-    // ---------- 7. Upload to farzi.me so the folio appears in the public library
+    // ---------- 7. Upload to farzipedia.com so the folio appears in the public library
     // Non-fatal: if the upload fails (network blip, server down), the local
     // result page still works. We surface it as a warning, not an error.
-    await update('publishing to farzi.me', 0.96);
+    await update('publishing to farzipedia.com', 0.96);
     try {
       const { url } = await phase('publish', () => uploadFolio(blog, frames, jobId, repoName));
       blog.meta.publicUrl = url;
       await chrome.storage.local.set({ [jobId]: { blog, frames: frameMap, ts: Date.now() } });
     } catch (e) {
-      console.warn('[FarziPedia] publish to farzi.me failed:', e?.message || e);
-      await warn(`Couldn't publish to farzi.me (${String(e?.message || e).slice(0, 120)}). The post is still saved locally.`);
+      console.warn('[FarziPedia] publish to farzipedia.com failed:', e?.message || e);
+      await warn(`Couldn't publish to farzipedia.com (${String(e?.message || e).slice(0, 120)}). The post is still saved locally.`);
     }
 
     return { jobId, publicUrl: blog.meta.publicUrl || null, title: meta.title };
@@ -1137,6 +1349,7 @@ async function processVideo(tabId, windowId, { apiKey, update, warn, repoName = 
 // ---------- Single-video job ----------
 
 async function runJob(tabId) {
+  await _staleStateCleanup;
   if (_state) {
     broadcast({ type: 'error', message: 'A job is already running. Wait for it to finish.' });
     return;
@@ -1250,6 +1463,11 @@ async function waitForWatchPage(tabId, videoId, timeoutMs = 60_000) {
     if (!tab) throw new Error('YouTube tab was closed.');
     if (tab.status === 'complete' && (tab.url || '').includes(videoId)) {
       const ready = await execInPage(tabId, () => {
+        // Start the player if autoplay didn't (the run mutes the tab):
+        // captions and capture both need a started video.
+        const p = document.querySelector('#movie_player');
+        const state = p?.getPlayerState?.();
+        if (state === -1 || state === 5) { try { p.playVideo(); } catch {} }
         const v = document.querySelector('video.html5-main-video') || document.querySelector('video');
         return !!(v && v.readyState >= 2 && v.duration > 0);
       }).catch(() => false);
@@ -1264,8 +1482,10 @@ async function waitForWatchPage(tabId, videoId, timeoutMs = 60_000) {
 }
 
 const PLAYLIST_MAX_VIDEOS = 50;
+const YOUTUBE_URL_RE = /^https:\/\/([a-z0-9-]+\.)?youtube\.com\//i;
 
 async function runPlaylistJob(tabId, playlistUrl) {
+  await _staleStateCleanup;
   if (_state) {
     broadcast({ type: 'error', message: 'A job is already running. Wait for it to finish.' });
     return;
@@ -1273,6 +1493,14 @@ async function runPlaylistJob(tabId, playlistUrl) {
   const listId = parsePlaylistId(playlistUrl);
   if (!listId) {
     broadcast({ type: 'error', message: 'That link has no usable playlist id (auto-generated mixes aren\'t supported).' });
+    return;
+  }
+  // The run navigates this tab from video to video. Only take over a YouTube
+  // tab: any other page would lose whatever the user had open, and the
+  // cross-origin hop drops the activeTab grant that screenshots need.
+  const startTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!YOUTUBE_URL_RE.test(startTab?.url || '')) {
+    broadcast({ type: 'error', message: 'Start a playlist from a YouTube tab — FarziPedia plays the videos in that tab.' });
     return;
   }
 
@@ -1358,7 +1586,7 @@ async function runPlaylistJob(tabId, playlistUrl) {
 
         // A bad/broke API key fails every video identically — and only after
         // each one has burned minutes on captures. Stop the whole run now.
-        if (/401|rejected your key|out of credit|spend limit|no claude api key/i.test(reason)) {
+        if (/rejected your key|out of credit|spend limit|no claude api key/i.test(reason)) {
           throw new Error(`Stopping the playlist — this will fail for every video: ${reason}`);
         }
         // Three failures before any success = something systematic. Abort
@@ -1375,12 +1603,18 @@ async function runPlaylistJob(tabId, playlistUrl) {
     }
     const uploaded = published.filter(r => r.publicUrl);
     if (uploaded.length < published.length) {
-      await warn(`${published.length - uploaded.length} folio(s) were generated but couldn't be published — they're saved locally in the extension.`);
+      await warn(`${published.length - uploaded.length} folio(s) were generated but couldn't be published — they're in the extension's local library.`);
     }
     await update(`done — ${uploaded.length}/${videos.length} folios bound into the "${repoName}" tome`, 1);
     await saveLastRun({ ok: true, kind: 'playlist', published: uploaded.length, total: videos.length });
     broadcast({ type: 'done', jobId: published[published.length - 1].jobId });
-    chrome.tabs.create({ url: `${await resolveFarziBase()}/` });
+    // Every folio reached the site: show it there. Otherwise open the local
+    // library, which lists every post from this run.
+    chrome.tabs.create({
+      url: uploaded.length === published.length
+        ? `${await resolveFarziBase()}/`
+        : chrome.runtime.getURL('result/result.html'),
+    });
   } catch (e) {
     console.error('[FarziPedia] playlist job failed:', e?.message || e);
     await saveLastRun({ ok: false, kind: 'playlist', error: friendlyError(e) });
@@ -1401,8 +1635,10 @@ async function generateBlogWithRetry(apiKey, snippets, frames, meta) {
     } catch (e) {
       last = e;
       const msg = String(e?.message || e).toLowerCase();
-      const transient = msg.includes('429') || msg.includes('5') && msg.includes('overloaded')
-                     || msg.includes('timeout') || msg.includes('network');
+      // Retry what the Anthropic SDKs retry: 408/409/429/5xx and dropped
+      // connections (Chrome's fetch reports those as "Failed to fetch").
+      const transient = /claude api error (408|409|429|5\d\d)\b/.test(msg)
+                     || /overloaded|timed? ?out|network|failed to fetch/.test(msg);
       if (!transient || attempt === 2) throw e;
       await sleep(1500 * (attempt + 1));
     }
@@ -1414,16 +1650,20 @@ async function generateBlogWithRetry(apiKey, snippets, frames, meta) {
 function friendlyError(e) {
   const raw = String(e?.message || e);
   const lower = raw.toLowerCase();
-  if (lower.includes('401') || lower.includes('authentication')) {
+  // Classify Claude failures by status code / error type only: bare
+  // substrings like "rate" or "401" also match "generate", request ids and
+  // YouTube errors (and a misread "bad key" aborts a whole playlist).
+  const status = /claude api error (\d{3})/.exec(lower)?.[1];
+  if (status === '401' || lower.includes('authentication_error')) {
     return 'Claude API rejected your key (401). Open the popup and paste a fresh key.';
   }
-  if (lower.includes('429') || lower.includes('rate')) {
+  if (status === '429' || lower.includes('rate_limit_error')) {
     return 'Anthropic rate-limited the request. Wait a minute and try again.';
   }
-  if (lower.includes('overload') || lower.includes('529')) {
+  if (status === '529' || lower.includes('overloaded_error')) {
     return 'Anthropic is overloaded right now. Try again in a couple of minutes.';
   }
-  if (lower.includes('quota') || lower.includes('credit') || lower.includes('billing')) {
+  if (status && /credit balance|billing|quota|usage limit|spend limit/.test(lower)) {
     return 'Your Anthropic account is out of credit or hit its spend limit.';
   }
   if (lower.includes('captures') && lower.includes('chrome')) {
@@ -1477,6 +1717,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
         case 'IS_RUNNING':
+          // Settle any ghost state first, so the popup's next read of
+          // storage already shows the interrupted run.
+          await _staleStateCleanup;
           sendResponse({ ok: true, data: !!_state });
           return;
         default:

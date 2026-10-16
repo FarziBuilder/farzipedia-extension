@@ -216,13 +216,49 @@ function downloadText(text, filename, mime = 'text/markdown') {
   URL.revokeObjectURL(url);
 }
 
+// ---------- Local library (no job id) ----------
+
+/** List every post saved in this browser, newest first — the only way to
+ * reach posts that never made it to farzipedia.com. */
+async function renderLibrary() {
+  const keys = chrome.storage.local.getKeys
+    ? await chrome.storage.local.getKeys()
+    : Object.keys(await chrome.storage.local.get(null));
+  const created = (k) => parseInt(k.split('-')[1], 10) || 0;
+  const jobKeys = keys.filter(k => k.startsWith('job-')).sort((a, b) => created(b) - created(a));
+
+  const root = $('content');
+  root.innerHTML = '';
+  $('md-btn').style.display = 'none';
+  $('pdf-btn').style.display = 'none';
+  document.title = 'Saved codices · FarziPedia';
+  root.appendChild(el('header', { class: 'codex-header' }, [el('h1', { text: 'Saved codices' })]));
+  if (!jobKeys.length) {
+    root.appendChild(el('p', { class: 'loading', text: 'No posts are saved in this browser yet.' }));
+    return;
+  }
+  const ul = el('ul');
+  // One job at a time: each holds a post's frames, so loading them all at
+  // once would pull hundreds of MB after a playlist run.
+  for (const k of jobKeys) {
+    const job = (await chrome.storage.local.get(k))[k];
+    if (!job?.blog) continue;
+    const when = new Date(job.ts || created(k)).toLocaleString();
+    ul.appendChild(el('li', {}, [
+      el('a', { href: `?job=${encodeURIComponent(k)}`, text: job.blog.title || 'Untitled' }),
+      ` · ${when}`,
+    ]));
+  }
+  root.appendChild(el('section', { class: 'codex-section' }, [ul]));
+}
+
 // ---------- Boot ----------
 
 (async () => {
   const params = new URLSearchParams(location.search);
   const jobId = params.get('job');
   if (!jobId) {
-    $('content').innerHTML = '<p class="loading">No job id.</p>';
+    await renderLibrary();
     return;
   }
   const stored = await chrome.storage.local.get(jobId);

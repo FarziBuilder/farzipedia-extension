@@ -192,11 +192,15 @@ function renderLastRun(lastrun) {
 // ---------- Reattach if a job is already running ----------
 
 async function maybeReattach() {
-  const { __farzi_running } = await chrome.storage.local.get('__farzi_running');
-  if (!__farzi_running) {
+  // Ask the worker rather than trusting storage: a worker that died mid-run
+  // leaves its last state behind, and reattaching to it freezes the popup.
+  let running = false;
+  try { running = !!(await chrome.runtime.sendMessage({ type: 'IS_RUNNING' }))?.data; } catch {}
+  if (!running) {
     await initIdle();
     return;
   }
+  const { __farzi_running } = await chrome.storage.local.get('__farzi_running');
   showRunning();
   applyState(__farzi_running);
   startListeningForProgress();
@@ -277,6 +281,12 @@ ui.playlistBtn.addEventListener('click', async () => {
   if (!tab) return;
   const playlistUrl = ui.playlistUrl.value.trim();
   if (!playlistUrl) { ui.playlistInfo.textContent = 'Paste a playlist link first.'; return; }
+  // The run plays the videos in this tab, so it must already be YouTube —
+  // taking over any other page would throw away what's open there.
+  if (!/^https:\/\/([a-z0-9-]+\.)?youtube\.com\//i.test(tab.url || '')) {
+    ui.playlistInfo.textContent = 'Open any YouTube page in this tab first — the playlist plays here.';
+    return;
+  }
 
   ui.playlistBtn.disabled = true;
   ui.playlistInfo.textContent = 'reading playlist…';

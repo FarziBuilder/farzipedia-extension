@@ -35,7 +35,8 @@
       <p class="hint">
         Paste a YouTube playlist link. Every video becomes a folio, and all of
         them are bound into a tome named after the playlist on farzipedia.com.
-        Keep this tab visible — it will walk through the videos by itself.
+        Start from a YouTube tab and keep it visible — FarziPedia walks
+        through the videos in it by itself.
       </p>
       <input id="playlist-url" type="text" placeholder="https://www.youtube.com/playlist?list=…"
              autocomplete="off" spellcheck="false">
@@ -53,11 +54,11 @@
     </details>
 
     <details class="settings">
-      <summary>Use my own API key (overrides built-in)</summary>
+      <summary>Your Claude API key</summary>
       <p class="hint">
-        FarziPedia calls Claude directly from your browser. By default it uses
-        a built-in key — but you can paste your own to bill against your own
-        account or get higher limits. Get one at
+        FarziPedia calls Claude directly from your browser with your Anthropic
+        API key, billed to your own account (it overrides any key built into
+        the extension). Get one at
         <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>.
       </p>
       <input id="api-key" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false">

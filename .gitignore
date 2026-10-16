@@ -16,3 +16,6 @@ lib/config.local.js
 
 # Logs
 *.log
+
+# Packaged builds (scripts/publish.mjs)
+dist/
