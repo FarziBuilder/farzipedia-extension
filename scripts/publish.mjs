@@ -5,6 +5,7 @@
 //   node scripts/publish.mjs status    show what the store has (read-only)
 //   node scripts/publish.mjs upload    check + upload the zip as a draft (not submitted)
 //   node scripts/publish.mjs publish   check + upload + submit for review (goes live when approved)
+//   node scripts/publish.mjs submit    submit the already-uploaded draft (e.g. after fixing the listing)
 //
 // Flags: --staged       publish: hold the approved version until you release it in the dashboard
 //        --allow-dirty  skip the "everything committed and pushed" check
@@ -147,7 +148,13 @@ async function store(cfg, token) {
       const hint = res.status === 403
         ? ' — is the service account added under Account in the Developer Dashboard, and the Chrome Web Store API enabled in its Cloud project?'
         : '';
-      die(`${method} ${url.replace(API, '')} → HTTP ${res.status}${hint}\n${res.text.slice(0, 800)}`);
+      // Spell out what the store objected to: the reasons live in error.details.
+      const details = (res.json?.error?.details || [])
+        .map(d => d.reason || d.message || (d.violations || d.fieldViolations || []).map(v => v.description).join('; '))
+        .filter(Boolean);
+      die(`${method} ${url.replace(API, '')} → HTTP ${res.status}${hint}\n` +
+        `${res.json?.error?.message || res.text.slice(0, 800)}` +
+        (details.length ? `\n  - ${[...new Set(details)].join('\n  - ')}` : ''));
     }
     return res.json || {};
   };
@@ -178,13 +185,14 @@ function printStatus(s) {
 // ---------- main ----------
 
 async function main() {
-  if (!['check', 'status', 'upload', 'publish'].includes(cmd)) die(`Unknown command "${cmd}". Use check | status | upload | publish.`);
+  if (!['check', 'status', 'upload', 'publish', 'submit'].includes(cmd)) die(`Unknown command "${cmd}". Use check | status | upload | publish | submit.`);
 
-  if (cmd === 'status') {
+  if (cmd === 'status' || cmd === 'submit') {
     const cfg = loadConfig();
     const api = await store(cfg, await accessToken(cfg));
     console.log(`Chrome Web Store item ${cfg.itemId}:`);
     printStatus(await api.status());
+    if (cmd === 'submit') await submit(api, cfg);
     return;
   }
 
@@ -218,6 +226,10 @@ async function main() {
     return;
   }
 
+  await submit(api, cfg);
+}
+
+async function submit(api, cfg) {
   const pub = await api.publish(flags.has('--staged'));
   console.log(`✓ submitted for review — state ${pub.state || 'unknown'}`);
   for (const w of pub.warningInfo?.warnings || []) console.log(`  warning: ${w.reason}: ${w.description}`);
