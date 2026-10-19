@@ -17,7 +17,7 @@ Open a YouTube video → click the FarziPedia icon → click **Render the Codex*
 The extension:
 1. Reads the transcript through YouTube's own player (with three fallbacks)
 2. Seeks the video to 20–60 cue-driven timestamps and screenshots each
-3. Sends the transcript + frames to Claude (your own Anthropic API key)
+3. Sends the transcript + frames to Claude (FarziPedia's built-in key, or your own Anthropic key)
 4. Returns a magazine-style blog post — illuminated initials, parchment background, Cinzel Roman caps
 5. Saves it as Markdown or PDF on demand
 
@@ -49,19 +49,13 @@ Or download as a ZIP: green **Code** button on this page → **Download ZIP** �
 4. Pick the `farzipedia-extension/` folder you just downloaded
 5. Pin the icon: click the puzzle-piece in the Chrome toolbar → 📌 next to FarziPedia
 
-### 3. Get an Anthropic API key
+### 3. (Optional) Use your own Anthropic API key
 
-The extension calls Claude directly from your browser, so it needs your own key.
+FarziPedia works out of the box: without a key, it sends requests through farzipedia.com, which adds FarziPedia's own key on the server. To bill your own Anthropic account instead:
 
-1. Sign up at [console.anthropic.com](https://console.anthropic.com/) (free)
-2. **Settings → API Keys → Create Key** — copy the `sk-ant-…` value once (Anthropic shows it only once)
-3. **Set a spend limit** at [console.anthropic.com/settings/limits](https://console.anthropic.com/settings/limits) — $5–10/month is plenty for hundreds of videos. **Do this** — it's cheap insurance against bugs or accidental loops.
-
-### 4. Paste the key in the popup
-
-Click the FarziPedia icon → expand "Your Claude API key" → paste your `sk-ant-…` → **Save**.
-
-The popup status will switch to **✓ using your saved key** and the **Render the Codex** button will enable.
+1. At [console.anthropic.com](https://console.anthropic.com/), create a key **inside a workspace** (Settings → Workspaces → pick one → API keys). Keys that aren't tied to a workspace are rejected.
+2. **Set a spend limit** at [console.anthropic.com/settings/limits](https://console.anthropic.com/settings/limits).
+3. Click the FarziPedia icon → expand "Use your own Claude API key" → paste your `sk-ant-…` → **Save**. The popup shows **✓ using your saved key**. **Clear** goes back to the built-in key.
 
 That's it. Open any YouTube video with captions, press play, and try it.
 
@@ -69,7 +63,7 @@ That's it. Open any YouTube video with captions, press play, and try it.
 
 ## What each video costs you
 
-Roughly **$0.50–$1.50** with Claude Opus 4.8, depending on length: frames are most of the input (20 for a short video, up to 60 for a long one, ~1,900 tokens each at 1600px), plus the transcript and the written post. A $10 spend limit covers about 10 videos. These are estimates; your Anthropic console shows the real cost per request.
+Nothing, unless you use your own key: then roughly **$0.50–$1.50** per video with Claude Opus 4.8, depending on length: frames are most of the input (20 for a short video, up to 60 for a long one, ~1,900 tokens each at 1600px), plus the transcript and the written post. A $10 spend limit covers about 10 videos. These are estimates; your Anthropic console shows the real cost per request.
 
 ---
 
@@ -87,7 +81,7 @@ For each planned timestamp:
    ├─ chrome.tabs.captureVisibleTab → crop to video bounds → shrink to ≤1600px
    └─ verify frame isn't black, retry if it is
        ↓
-Send transcript + frames to api.anthropic.com (claude-opus-4-8)
+Send transcript + frames to Claude (claude-opus-4-8): direct with your key, else via farzipedia.com
        ↓
 Publish the post to farzipedia.com (saved locally too) and open it
 ```
@@ -119,7 +113,7 @@ farzipedia-extension/
 
 | Symptom | Fix |
 |---|---|
-| "**No API key configured**" in popup | Paste your `sk-ant-…` in the popup's "Your Claude API key" section. |
+| "**isn't tied to a workspace**" | Your Anthropic key is organization-wide. Create a key inside a workspace and paste that, or press **Clear** to use the built-in key. |
 | "**Press play on the video**" | YouTube only loads captions once a video has started. Play it for a moment (skip any ad), then click Render again. |
 | "**Start a playlist from a YouTube tab**" | The playlist plays in the current tab, so open any YouTube page first. |
 | "**Couldn't read YouTube's player data**" | Refresh the YouTube tab (Ctrl+R), then reopen the popup. |

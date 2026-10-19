@@ -1029,13 +1029,11 @@ async function cropToBounds(dataUrl, bounds) {
 //   API key
 // ============================================================================
 
+/** The user's own key, else one set in lib/config.js, else '' — which sends
+ * generation through FarziPedia's server and the key it holds. */
 async function getApiKey() {
   const { anthropicApiKey } = await chrome.storage.sync.get('anthropicApiKey');
-  const key = (anthropicApiKey || '').trim() || (BUILTIN_API_KEY || '').trim();
-  if (!key) {
-    throw new Error('No Claude API key configured. Either fill in lib/config.js or paste one in the popup.');
-  }
-  return key;
+  return (anthropicApiKey || '').trim() || (BUILTIN_API_KEY || '').trim();
 }
 
 // ============================================================================
@@ -1586,7 +1584,7 @@ async function runPlaylistJob(tabId, playlistUrl) {
 
         // A bad/broke API key fails every video identically — and only after
         // each one has burned minutes on captures. Stop the whole run now.
-        if (/rejected your key|out of credit|spend limit|no claude api key/i.test(reason)) {
+        if (/rejected your key|out of credit|spend limit|tied to a workspace|built-in key isn't available/i.test(reason)) {
           throw new Error(`Stopping the playlist — this will fail for every video: ${reason}`);
         }
         // Three failures before any success = something systematic. Abort
@@ -1637,8 +1635,12 @@ async function generateBlogWithRetry(apiKey, snippets, frames, meta) {
       const msg = String(e?.message || e).toLowerCase();
       // Retry what the Anthropic SDKs retry: 408/409/429/5xx and dropped
       // connections (Chrome's fetch reports those as "Failed to fetch").
-      const transient = /claude api error (408|409|429|5\d\d)\b/.test(msg)
-                     || /overloaded|timed? ?out|network|failed to fetch/.test(msg);
+      // Not 504: that's FarziPedia's server giving up after 10 minutes, and
+      // repeating it would just triple the wait.
+      const status = /claude api error (\d{3})/.exec(msg)?.[1];
+      const transient = status
+        ? /^(408|409|429|5\d\d)$/.test(status) && status !== '504'
+        : /overloaded|timed? ?out|network|failed to fetch/.test(msg);
       if (!transient || attempt === 2) throw e;
       await sleep(1500 * (attempt + 1));
     }
@@ -1654,6 +1656,14 @@ function friendlyError(e) {
   // substrings like "rate" or "401" also match "generate", request ids and
   // YouTube errors (and a misread "bad key" aborts a whole playlist).
   const status = /claude api error (\d{3})/.exec(lower)?.[1];
+  if (lower.includes('not scoped to a workspace')) {
+    return "Your Anthropic key isn't tied to a workspace, so Anthropic won't accept it. "
+      + 'Create a key inside a workspace at console.anthropic.com and paste that, '
+      + "or press Clear in the popup to use FarziPedia's built-in key.";
+  }
+  if (status === '503' && lower.includes('proxy is not configured')) {
+    return "FarziPedia's built-in key isn't available right now. Paste your own Anthropic key in the popup.";
+  }
   if (status === '401' || lower.includes('authentication_error')) {
     return 'Claude API rejected your key (401). Open the popup and paste a fresh key.';
   }

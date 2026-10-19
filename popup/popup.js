@@ -1,6 +1,5 @@
 // FarziPedia popup — UI for the foolproof background pipeline.
 
-import { BUILTIN_API_KEY } from '../lib/config.js';
 import { MODEL } from '../lib/analyzer.js';
 
 const $ = (id) => document.getElementById(id);
@@ -49,9 +48,9 @@ function fmtSeconds(s) {
   return `${m}:${(s % 60).toString().padStart(2, '0')}`;
 }
 
-const HAS_BUILTIN = !!(BUILTIN_API_KEY || '').trim();
-
 // ---------- API key handling ----------
+// A key is optional: without one, generation goes through FarziPedia's
+// server, which holds its own key.
 
 ui.showKey.addEventListener('change', () => {
   ui.apiKey.type = ui.showKey.checked ? 'text' : 'password';
@@ -78,7 +77,7 @@ ui.saveKey.addEventListener('click', async () => {
 ui.clearKey.addEventListener('click', async () => {
   await chrome.storage.sync.remove('anthropicApiKey');
   ui.apiKey.value = '';
-  ui.saveMsg.textContent = HAS_BUILTIN ? 'Cleared. Falling back to built-in key.' : 'Cleared.';
+  ui.saveMsg.textContent = "Cleared. Using FarziPedia's built-in key.";
   setTimeout(() => { ui.saveMsg.textContent = ''; }, 2200);
   await initIdle();
 });
@@ -101,19 +100,9 @@ async function initIdle() {
   // Key status
   const { anthropicApiKey } = await chrome.storage.sync.get('anthropicApiKey');
   const userKey = (anthropicApiKey || '').trim();
-  if (userKey) {
-    ui.keyStatus.textContent = '✓ using your saved key';
-    ui.keyStatus.className = 'key-status ok';
-  } else if (HAS_BUILTIN) {
-    ui.keyStatus.textContent = '✓ using built-in key';
-    ui.keyStatus.className = 'key-status ok';
-  } else {
-    ui.keyStatus.textContent = '⚠ no API key — set one below';
-    ui.keyStatus.className = 'key-status warn';
-  }
-
-  const hasAnyKey = !!userKey || HAS_BUILTIN;
-  ui.playlistBtn.disabled = !hasAnyKey;
+  ui.keyStatus.textContent = userKey ? '✓ using your saved key' : "✓ using FarziPedia's built-in key";
+  ui.keyStatus.className = 'key-status ok';
+  ui.playlistBtn.disabled = false;
 
   // Post-mortem of the most recent run — the live warnings vanish when a run
   // ends, so a failed run leaves its chronicle here for the curious.
@@ -168,8 +157,8 @@ async function initIdle() {
     ui.videoTitle.textContent = '(refresh the YouTube tab and reopen the popup)';
   }
 
-  ui.generateBtn.disabled = !hasAnyKey;
-  ui.generateBtn.title = hasAnyKey ? '' : 'Add a Claude API key first';
+  ui.generateBtn.disabled = false;
+  ui.generateBtn.title = '';
 }
 
 function renderLastRun(lastrun) {
